@@ -1,0 +1,254 @@
+# ======================= BACKUP SELETIVO POR PALAVRAS-CHAVE =======================
+# Autor: Pedro Santos
+# Função: Copiar apenas as pastas da ORIGEM cujo NOME contenha ao menos uma palavra-chave para o DESTINO.
+# Recursos: pré-visualização (dry-run), estimar tamanho opcional, log TXT + CSV,
+#           robocopy (rápido/robusto) com fallback para Copy-Item, preserva estrutura.
+# Observação: é CÓPIA (não apaga nada da origem nem do destino); não faz espelhamento/DELETE.
+
+# ---------- Config inicial ----------
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$ErrorActionPreference = 'Stop'
+$Timestamp   = Get-Date -Format 'yyyyMMdd_HHmmss'
+$Desktop     = [Environment]::GetFolderPath('Desktop')
+$LogTxtPath  = Join-Path $Desktop "BackupSeletivo_$Timestamp.txt"
+$LogCsvPath  = Join-Path $Desktop "BackupSeletivo_$Timestamp.csv"
+Start-Transcript -Path $LogTxtPath -Append | Out-Null
+
+function Write-Info([string]$msg){ Write-Host "[i] $msg" -ForegroundColor Cyan }
+function Write-Ok([string]$msg){ Write-Host "[OK] $msg" -ForegroundColor Green }
+function Write-Warn([string]$msg){ Write-Host "[!] $msg" -ForegroundColor Yellow }
+function Write-Err([string]$msg){ Write-Host "[x] $msg" -ForegroundColor Red }
+
+function Require-Path([string]$path, [string]$label){
+    if([string]::IsNullOrWhiteSpace($path)){ throw "Caminho de $label não informado." }
+    $resolved = Resolve-Path -LiteralPath $path -ErrorAction Stop
+    return $resolved.Path.TrimEnd('\')
+}
+
+function Ensure-Destination([string]$path){
+    if(-not (Test-Path -LiteralPath $path)){ New-Item -ItemType Directory -Path $path | Out-Null }
+    return (Resolve-Path -LiteralPath $path).Path.TrimEnd('\')
+}
+
+function Parse-Keywords([string]$raw){
+    $parts = $raw -split '[,\;\r\n]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
+    if($parts.Count -eq 0){ throw "Nenhuma palavra-chave válida informada." }
+    return $parts | Sort-Object -Unique
+}
+
+function Build-RegexPattern([string[]]$keywords){
+    $escaped = $keywords | ForEach-Object { [Regex]::Escape($_) }
+    $pattern = '(' + ($escaped -join '|') + ')'
+    return $pattern
+}
+
+function Get-MatchingDirectories([string]$source, [string]$pattern, [switch]$TopOnly){
+    Write-Info "Varredura de pastas em: $source (TopOnly=$($TopOnly.IsPresent))..."
+    if($TopOnly){
+        $dirs = Get-ChildItem -LiteralPath $source -Directory -Force -ErrorAction SilentlyContinue
+    } else {
+        $dirs = Get-ChildItem -LiteralPath $source -Directory -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    $dirs | Where-Object { $_.Name -match $pattern }
+}
+
+function Estimate-DirSizeBytes([string]$dirPath){
+    try{
+        $size = (Get-ChildItem -LiteralPath $dirPath -Recurse -File -Force -ErrorAction SilentlyContinue | Measure-Object -Sum Length).Sum
+        if(-not $size){ $size = 0 }
+        [int64]$size
+    } catch { [int64]0 }
+}
+
+function Format-Bytes([int64]$b){
+    switch ($b) {
+        {$_ -ge 1TB} { "{0:N2} TB" -f ($b/1TB); break }
+        {$_ -ge 1GB} { "{0:N2} GB" -f ($b/1GB); break }
+        {$_ -ge 1MB} { "{0:N2} MB" -f ($b/1MB); break }
+        {$_ -ge 1KB} { "{0:N2} KB" -f ($b/1KB); break }
+        default      { "$b bytes" }
+    }
+}
+
+function Confirm([string]$prompt){
+    $ans = Read-Host "$prompt (S/N)"
+    ($ans -match '^[sS]')
+}
+
+function Show-Header{
+    Clear-Host
+    Write-Host "============== BACKUP SELETIVO POR PALAVRAS-CHAVE ==============" -ForegroundColor Cyan
+    Write-Host "Copia somente pastas cujo NOME contenha pelo menos uma palavra-chave."
+    Write-Host "Mantém a estrutura relativa da origem no destino."
+    Write-Host "Logs: $LogTxtPath  |  CSV: $LogCsvPath"
+    Write-Host "==============================================================="
+}
+
+function Run-Backup {
+    Show-Header
+
+    # ---------- Coleta ----------
+    $src = Read-Host "Informe a ORIGEM (ex.: E:\Fiscal Novo\DP Fiscal\0 - Movimento do Fiscal\Empresas)"
+    $dst = Read-Host "Informe o DESTINO (ex.: V:\Sul\3 - Fiscal\0 - EMPRESAS)"
+    $kw  = Read-Host "Informe as PALAVRAS-CHAVE (separe por vírgula/Enter, ex.: 480,552,936 ou financeiro,nota,2024)"
+
+    $TopOnly = $false
+    if(Confirm "Pesquisar SOMENTE no nível imediatamente dentro da origem (sem recursão)?"){ $TopOnly = $true }
+
+    $DoSize = $false
+    if(Confirm "Deseja ESTIMAR tamanho das pastas (pode demorar)?"){ $DoSize = $true }
+
+    # ---------- Validação ----------
+    try {
+        $SourcePath = Require-Path $src "Origem"
+        $DestPath   = Ensure-Destination $dst
+        $Keywords   = Parse-Keywords $kw
+        $Pattern    = Build-RegexPattern $Keywords
+        Write-Ok "Origem: $SourcePath"
+        Write-Ok "Destino: $DestPath"
+        Write-Ok "Palavras-chave: $($Keywords -join ', ')"
+    } catch {
+        Write-Err $_.Exception.Message
+        return
+    }
+
+    # ---------- Matching ----------
+    $matches = Get-MatchingDirectories -source $SourcePath -pattern $Pattern -TopOnly:$TopOnly
+    if(-not $matches -or $matches.Count -eq 0){
+        Write-Warn "Nenhuma pasta na origem contém as palavras informadas."
+        return
+    }
+
+    # ---------- Prévia ----------
+    Write-Host ""
+    Write-Host "Pré-visualização (pastas que serão copiadas):" -ForegroundColor Yellow
+    $preview = @(); [int64]$totalBytes = 0
+    foreach($d in $matches){
+        $rel = $d.FullName.Substring($SourcePath.Length).TrimStart('\')
+        $target = Join-Path $DestPath $rel
+        [int64]$size = 0
+        if($DoSize){ $size = Estimate-DirSizeBytes $d.FullName; $totalBytes += $size; Write-Host (" - {0}   (=> {1})   [{2}]" -f $d.FullName, $target, (Format-Bytes $size)) }
+        else       { Write-Host (" - {0}   (=> {1})" -f $d.FullName, $target) }
+
+        $preview += [PSCustomObject]@{
+            SourceDirectory = $d.FullName
+            RelativePath    = $rel
+            TargetDirectory = $target
+            BytesEstimate   = $size
+        }
+    }
+    try { $preview | Export-Csv -Path $LogCsvPath -NoTypeInformation -Delimiter ';' -Encoding UTF8 } catch {}
+    if($DoSize){ Write-Host ("Tamanho estimado TOTAL: {0}" -f (Format-Bytes $totalBytes)) -ForegroundColor Yellow }
+    Write-Info "Prévia salva em CSV: $LogCsvPath"
+
+    if(-not (Confirm "Prosseguir com a CÓPIA agora?")){
+        Write-Warn "Operação cancelada (somente pré-visualização)."
+        return
+    }
+
+    # ---------- Cópia ----------
+    $RobocopyExe = Join-Path $env:SystemRoot "System32\robocopy.exe"
+    $roboArgsCommon = @(
+        '/E',           # inclui subpastas (inclusive vazias)
+        '/COPY:DAT',    # dados, atributos, timestamps
+        '/DCOPY:T',     # timestamps de diretórios
+        '/Z',           # cópia reiniciável
+        '/R:1','/W:1',  # 1 tentativa, 1s de espera
+        '/MT:16',       # multithread
+        '/XJ',          # ignora junctions (evita loops em bibliotecas Pastas/Música/Imagens)
+        '/NFL','/NDL','/NP'  # logs menos verbosos
+    )
+
+    $errors = 0
+    foreach($item in $preview){
+        $srcDir = $item.SourceDirectory
+        $dstDir = $item.TargetDirectory
+        try {
+            if(-not (Test-Path -LiteralPath $dstDir)){ New-Item -ItemType Directory -Path $dstDir -Force | Out-Null }
+            Write-Info "Copiando: $srcDir  =>  $dstDir"
+
+            # ROBUSTO: chama robocopy diretamente do System32 (sem máscara; padrão é *.*)
+            $null = & $RobocopyExe $srcDir $dstDir @roboArgsCommon
+            $rc = $LASTEXITCODE
+
+            if($rc -ge 8){
+                Write-Warn "Robocopy falhou (ExitCode=$rc). Tentando cópia alternativa (Copy-Item)..."
+                try{
+                    # Fallback: copia CONTEÚDO do diretório (evita duplicar a pasta dentro de si)
+                    Get-ChildItem -LiteralPath $srcDir -Force | ForEach-Object {
+                        Copy-Item -LiteralPath $_.FullName -Destination $dstDir -Recurse -Force -ErrorAction Stop
+                    }
+                    Write-Ok "Concluído (fallback): $srcDir"
+                } catch {
+                    $errors++
+                    Write-Err "Falha também no fallback em '$srcDir' => '$dstDir': $($_.Exception.Message)"
+                }
+            } else {
+                Write-Ok "Concluído: $srcDir"
+            }
+        } catch {
+            $errors++
+            Write-Err "Erro copiando '$srcDir' => '$dstDir': $($_.Exception.Message)"
+        }
+    }
+
+    if($errors -gt 0){
+        Write-Warn "Finalizado com $errors falha(s). Veja o log: $LogTxtPath"
+    } else {
+        Write-Ok "Backup seletivo finalizado sem falhas. 🎉"
+    }
+    Write-Info "CSV com o mapa do que foi copiado: $LogCsvPath"
+    Write-Info "TXT com o transcript/log: $LogTxtPath"
+}
+
+function Show-Menu{
+    Show-Header
+    Write-Host "[1] Executar backup seletivo (interativo)" -ForegroundColor Green
+    Write-Host "[2] Somente pré-visualização (sem copiar)"
+    Write-Host "[0] Sair"
+    Write-Host "==============================================================="
+}
+
+function Preview-Only {
+    Show-Header
+    $src = Read-Host "Informe a ORIGEM"
+    $kw  = Read-Host "Informe as PALAVRAS-CHAVE"
+    $TopOnly = Confirm "Pesquisar SOMENTE no nível imediatamente dentro da origem (sem recursão)?"
+
+    $SourcePath = Require-Path $src "Origem"
+    $Keywords   = Parse-Keywords $kw
+    $Pattern    = Build-RegexPattern $Keywords
+
+    $matches = Get-MatchingDirectories -source $SourcePath -pattern $Pattern -TopOnly:$TopOnly
+    if(-not $matches -or $matches.Count -eq 0){ Write-Warn "Nenhuma pasta encontrada contendo: $($Keywords -join ', ')"; return }
+
+    Write-Host "Pastas candidatas:" -ForegroundColor Yellow
+    foreach($d in $matches){ Write-Host " - $($d.FullName)" }
+    Write-Ok "Pré-visualização concluída."
+}
+
+# ---------- Loop principal ----------
+do {
+    try {
+        Show-Menu
+        $opt = Read-Host "Escolha uma opção"
+        switch($opt){
+            '1' { Run-Backup }
+            '2' { Preview-Only }
+            '0' { break }
+            default { Write-Warn "Opção inválida." }
+        }
+        if($opt -ne '0'){
+            Write-Info "Pressione Enter para voltar ao menu..."
+            [void][System.Console]::ReadLine()
+        }
+    } catch {
+        Write-Err "Erro: $($_.Exception.Message)"
+        Write-Info "Pressione Enter para continuar..."
+        [void][System.Console]::ReadLine()
+    }
+} while ($true)
+
+Stop-Transcript | Out-Null
+Write-Ok "Encerrado. Logs: $LogTxtPath  |  CSV: $LogCsvPath"
+# =========================================================================================
