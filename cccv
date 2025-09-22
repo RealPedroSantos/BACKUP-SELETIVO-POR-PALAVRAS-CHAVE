@@ -147,10 +147,17 @@ do {
     $opt = Read-Host "Escolha uma opção"
     switch($opt){
       '1' { Run-Backup }
-      '0' { break }
+      '0' {
+           Info "Saindo..."
+           Start-Sleep -Milliseconds 120
+           exit 0                 # fecha o processo do PowerShell
+      }
       default { Warn "Opção inválida." }
     }
-    if($opt -ne '0'){ Info "Pressione Enter para voltar ao menu..."; [void][System.Console]::ReadLine() }
+    if($opt -ne '0'){
+      Info "Pressione Enter para voltar ao menu..."
+      [void][System.Console]::ReadLine()
+    }
   } catch {
     Err ("Erro: {0}" -f $_.Exception.Message)
     Info "Pressione Enter para continuar..."
