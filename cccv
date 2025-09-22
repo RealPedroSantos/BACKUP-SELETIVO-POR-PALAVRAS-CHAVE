@@ -1,12 +1,13 @@
-# ================= BACKUP SELETIVO POR PALAVRAS-CHAVE (v2.4) =================
-# Foco "Pastas": busca nomes de pastas e copia a PASTA INTEIRA (deepest only).
-# Foco "Arquivos": busca nomes de arquivos e copia só os ARQUIVOS que casarem.
-# É CÓPIA (não apaga). Mantém estrutura relativa. Sem logs/CSV.
-# -----------------------------------------------------------------------------
+# ============== SELETOR POR PALAVRAS-CHAVE (Cópia/Exclusão) v3.0 ==============
+# [1] Copiar:  Foco "Pastas" -> copia PASTA INTEIRA (deepest) | "Arquivos" -> só os arquivos
+# [2] Excluir: Foco "Pastas" -> apaga PASTA INTEIRA (deepest) | "Arquivos" -> só os arquivos
+# É CÓPIA (não apaga) no modo 1. Exclusão é permanente no modo 2 (sem lixeira).
+# ==============================================================================
 
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $ErrorActionPreference = 'Stop'
 
+# ---------------- Utilidades comuns ----------------
 function Info([string]$m){ Write-Host "[i] $m"  -ForegroundColor Cyan }
 function Ok  ([string]$m){ Write-Host "[OK] $m" -ForegroundColor Green }
 function Warn([string]$m){ Write-Host "[!] $m"  -ForegroundColor Yellow }
@@ -27,9 +28,16 @@ function ParseKeys([string]$raw){
 }
 function Pattern([string[]]$keys){ '(' + (($keys | ForEach-Object {[Regex]::Escape($_)}) -join '|') + ')' }
 function AskYN([string]$q){ ($ans = Read-Host "$q (S/N)") -match '^[sS]' }
-function AskFocus{
+
+# Foco com prompt ajustado por ação
+function AskFocus([string]$acao){
   do{
-    $a = Read-Host "Foco da busca: [P]astas (copia pasta inteira) | [A]rquivos (só arquivos)"
+    $txt = if($acao -eq 'Apagar'){
+      "Foco: [P]astas (apaga pasta inteira) | [A]rquivos (só arquivos)"
+    } else {
+      "Foco da busca: [P]astas (copia pasta inteira) | [A]rquivos (só arquivos)"
+    }
+    $a = Read-Host $txt
     switch -Regex ($a){
       '^[pP]' { return 'Pastas' }
       '^[aA]' { return 'Arquivos' }
@@ -49,21 +57,38 @@ function Keep-DeepestDirs([string[]]$dirPaths){
   ,$kept
 }
 
-function ShowHeader{
+# ---------------- Cabeçalhos ----------------
+function ShowHeaderMain{
+  Clear-Host
+  Write-Host "================ SELETOR POR PALAVRAS-CHAVE (v3.0) ================" -ForegroundColor Cyan
+  Write-Host "[1] Copiar (backup seletivo)" -ForegroundColor Green
+  Write-Host "[2] Excluir (apagamento seletivo - permanente)" -ForegroundColor Yellow
+  Write-Host "[0] Sair"
+  Write-Host "===================================================================="
+}
+function ShowHeaderCopy{
   Clear-Host
   Write-Host "============== BACKUP SELETIVO POR PALAVRAS-CHAVE (v2.4) =======" -ForegroundColor Cyan
   Write-Host "Pastas -> copia pasta inteira (deepest).  Arquivos -> só arquivos."
   Write-Host "==============================================================="
 }
+function ShowHeaderDelete{
+  Clear-Host
+  Write-Host "========== EXCLUSÃO SELETIVA POR PALAVRAS-CHAVE (v2.4) =========" -ForegroundColor Cyan
+  Write-Host "Pastas -> APAGA pasta inteira (deepest).  Arquivos -> APAGA só arquivos."
+  Write-Host "AÇÃO DESTRUTIVA! Sem lixeira. Confirme com atenção." -ForegroundColor Yellow
+  Write-Host "==============================================================="
+}
 
+# ---------------- Programa 1: COPIAR ----------------
 function Run-Backup {
-  ShowHeader
+  ShowHeaderCopy
 
   $src = Read-Host "Informe a ORIGEM (ex.: C:\A)"
   $dst = Read-Host "Informe o DESTINO (ex.: C:\B)"
   $kw  = Read-Host "Informe as PALAVRAS-CHAVE (ex.: 1111,2222,3333)"
   $recurse = AskYN "Varrer subpastas?"
-  $focus   = AskFocus
+  $focus   = AskFocus 'Copiar'
 
   try{
     $Source = Require-Path $src "Origem"
@@ -79,7 +104,7 @@ function Run-Backup {
   $errors = 0
 
   if($focus -eq 'Pastas'){
-    # -------- Foco: PASTAS -> copia PASTA INTEIRA (deepest) --------
+    # -------- PASTAS -> copia PASTA INTEIRA (deepest) --------
     $dirEnum = if($recurse){
       Get-ChildItem -LiteralPath $Source -Directory -Recurse -Force -ErrorAction SilentlyContinue
     } else {
@@ -110,7 +135,7 @@ function Run-Backup {
     }
   }
   else {
-    # -------- Foco: ARQUIVOS -> copia SÓ ARQUIVOS que casam --------
+    # -------- ARQUIVOS -> copia SÓ ARQUIVOS que casam --------
     $fileEnum = if($recurse){
       Get-ChildItem -LiteralPath $Source -File -Recurse -Force -ErrorAction SilentlyContinue
     } else {
@@ -137,24 +162,102 @@ function Run-Backup {
   if($errors -gt 0){ Warn ("Finalizado com {0} falha(s)." -f $errors) } else { Ok "Concluído sem falhas. 🎉" }
 }
 
-# ---------------- Menu ----------------
+# ---------------- Programa 2: EXCLUIR ----------------
+# Confirmação simples (apenas S/N)
+function Confirm-Deletion([int]$qtdPastas,[int]$qtdArquivos){
+  Write-Host ""
+  Write-Host ("Resumo: Pastas a apagar: {0} | Arquivos a apagar: {1}" -f $qtdPastas,$qtdArquivos) -ForegroundColor Yellow
+  return (AskYN "Prosseguir com a EXCLUSÃO agora?")
+}
+
+function Run-Delete {
+  ShowHeaderDelete
+
+  $src = Read-Host "Informe a ORIGEM (ex.: C:\A)"
+  $kw  = Read-Host "Informe as PALAVRAS-CHAVE (ex.: 1111,2222,3333)"
+  $recurse = AskYN "Varrer subpastas?"
+  $focus   = AskFocus 'Apagar'
+
+  try{
+    $Source = Require-Path $src "Origem"
+    $Keys   = ParseKeys $kw
+    $Regex  = Pattern $Keys
+    Info ("Origem:  {0}" -f $Source)
+    Info ("Chaves:  {0}" -f ($Keys -join ', '))
+    Info ("Busca:   {0} | Foco: {1}" -f ($(if($recurse){'recursiva'}else{'nível atual'}), $focus))
+  } catch { Err $_.Exception.Message; return }
+
+  $errors = 0
+
+  if($focus -eq 'Pastas'){
+    # -------- PASTAS -> APAGA PASTA INTEIRA (deepest) --------
+    $dirEnum = if($recurse){
+      Get-ChildItem -LiteralPath $Source -Directory -Recurse -Force -ErrorAction SilentlyContinue
+    } else {
+      Get-ChildItem -LiteralPath $Source -Directory          -Force -ErrorAction SilentlyContinue
+    }
+    $matched = @($dirEnum | Where-Object { $_.Name -match $Regex } | Select-Object -ExpandProperty FullName)
+    $deepest = Keep-DeepestDirs $matched
+
+    Info ("Pastas casadas (deepest): {0}" -f $deepest.Count)
+    if($deepest.Count -eq 0){ Warn "Nada para apagar."; return }
+
+    if(-not (Confirm-Deletion -qtdPastas $deepest.Count -qtdArquivos 0)){
+      Warn "Operação cancelada."; return
+    }
+
+    foreach($d in $deepest){
+      try{
+        Write-Host ("Apagando PASTA: {0}" -f $d)
+        Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction Stop
+        Ok ("Pasta apagada: {0}" -f $d)
+      } catch { $errors++; Err ("Falha ao apagar pasta '{0}': {1}" -f $d, $_.Exception.Message) }
+    }
+  }
+  else {
+    # -------- ARQUIVOS -> APAGA SÓ ARQUIVOS que casam --------
+    $fileEnum = if($recurse){
+      Get-ChildItem -LiteralPath $Source -File -Recurse -Force -ErrorAction SilentlyContinue
+    } else {
+      Get-ChildItem -LiteralPath $Source -File          -Force -ErrorAction SilentlyContinue
+    }
+    $files = @($fileEnum | Where-Object { $_.Name -match $Regex })
+
+    Info ("Arquivos que casam: {0}" -f $files.Count)
+    if($files.Count -eq 0){ Warn "Nada para apagar."; return }
+
+    if(-not (Confirm-Deletion -qtdPastas 0 -qtdArquivos $files.Count)){
+      Warn "Operação cancelada."; return
+    }
+
+    foreach($f in $files){
+      try{
+        Write-Host ("Apagando ARQUIVO: {0}" -f $f.FullName)
+        Remove-Item -LiteralPath $f.FullName -Force -ErrorAction Stop
+        Ok ("Arquivo apagado: {0}" -f $f.FullName)
+      } catch { $errors++; Err ("Falha ao apagar '{0}': {1}" -f $f.FullName, $_.Exception.Message) }
+    }
+  }
+
+  if($errors -gt 0){ Warn ("Finalizado com {0} falha(s)." -f $errors) } else { Ok "Concluído sem falhas. 🎉" }
+}
+
+# ---------------- Menu principal ----------------
 do {
   try {
-    ShowHeader
-    Write-Host "[1] Executar backup seletivo (interativo)" -ForegroundColor Green
-    Write-Host "[0] Sair"
-    Write-Host "==============================================================="
+    ShowHeaderMain
     $opt = Read-Host "Escolha uma opção"
     switch($opt){
       '1' { Run-Backup }
+      '2' { Run-Delete }
       '0' {
            Info "Saindo..."
            Start-Sleep -Milliseconds 120
-           exit 0                 # fecha o processo do PowerShell
+           exit 0     # fecha o processo do PowerShell
       }
       default { Warn "Opção inválida." }
     }
-    if($opt -ne '0'){
+    if($opt -notin @('0')){
       Info "Pressione Enter para voltar ao menu..."
       [void][System.Console]::ReadLine()
     }
@@ -164,4 +267,4 @@ do {
     [void][System.Console]::ReadLine()
   }
 } while ($true)
-# ============================================================================
+# ==============================================================================
