@@ -1,8 +1,8 @@
-# ======================= BACKUP SELETIVO POR PALAVRAS-CHAVE (v2.3) =======================
-# Padrão: ESTRITO -> copia APENAS itens cujo NOME contém alguma chave.
-# Extra:  PASTA=TUDO -> se a pasta casa, copia TUDO que há dentro dela.
+# ================= BACKUP SELETIVO POR PALAVRAS-CHAVE (v2.4) =================
+# Foco "Pastas": busca nomes de pastas e copia a PASTA INTEIRA (deepest only).
+# Foco "Arquivos": busca nomes de arquivos e copia só os ARQUIVOS que casarem.
 # É CÓPIA (não apaga). Mantém estrutura relativa. Sem logs/CSV.
-# -----------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $ErrorActionPreference = 'Stop'
@@ -27,23 +27,33 @@ function ParseKeys([string]$raw){
 }
 function Pattern([string[]]$keys){ '(' + (($keys | ForEach-Object {[Regex]::Escape($_)}) -join '|') + ')' }
 function AskYN([string]$q){ ($ans = Read-Host "$q (S/N)") -match '^[sS]' }
+function AskFocus{
+  do{
+    $a = Read-Host "Foco da busca: [P]astas (copia pasta inteira) | [A]rquivos (só arquivos)"
+    switch -Regex ($a){
+      '^[pP]' { return 'Pastas' }
+      '^[aA]' { return 'Arquivos' }
+      default { Warn "Opção inválida. Use P ou A." }
+    }
+  } while ($true)
+}
+
+# Mantém apenas as PASTAS mais profundas (deepest) entre casadas aninhadas
+function Keep-DeepestDirs([string[]]$dirPaths){
+  $kept = New-Object System.Collections.Generic.List[string]
+  foreach($cur in ($dirPaths | Sort-Object Length -Descending)){
+    $isAncestorOfKept = $false
+    foreach($k in $kept){ if($k.StartsWith($cur + '\')){ $isAncestorOfKept = $true; break } }
+    if(-not $isAncestorOfKept){ [void]$kept.Add($cur) }
+  }
+  ,$kept
+}
 
 function ShowHeader{
   Clear-Host
-  Write-Host "============== BACKUP SELETIVO POR PALAVRAS-CHAVE (v2.3) =======" -ForegroundColor Cyan
-  Write-Host "Modo padrão: ESTRITO (copia só itens com a chave no NOME)."
-  Write-Host "Extra: PASTA=TUDO (se a pasta casa, leva tudo dentro)."
+  Write-Host "============== BACKUP SELETIVO POR PALAVRAS-CHAVE (v2.4) =======" -ForegroundColor Cyan
+  Write-Host "Pastas -> copia pasta inteira (deepest).  Arquivos -> só arquivos."
   Write-Host "==============================================================="
-}
-
-function Keep-TopMostDirs([string[]]$dirPaths){
-  $kept = New-Object System.Collections.Generic.List[string]
-  foreach($cur in ($dirPaths | Sort-Object Length)){
-    if(-not ($kept | Where-Object { $cur.StartsWith($_ + '\') -or $cur -eq $_ })){
-      [void]$kept.Add($cur)
-    }
-  }
-  $kept
 }
 
 function Run-Backup {
@@ -52,46 +62,65 @@ function Run-Backup {
   $src = Read-Host "Informe a ORIGEM (ex.: C:\A)"
   $dst = Read-Host "Informe o DESTINO (ex.: C:\B)"
   $kw  = Read-Host "Informe as PALAVRAS-CHAVE (ex.: 1111,2222,3333)"
-
   $recurse = AskYN "Varrer subpastas?"
-  $strict  = AskYN "Modo ESTRITO (copiar APENAS itens cujo NOME casa)?"
+  $focus   = AskFocus
 
   try{
     $Source = Require-Path $src "Origem"
     $Dest   = Ensure-Dir   $dst
     $Keys   = ParseKeys $kw
     $Regex  = Pattern $Keys
-    Ok "Origem:  $Source"
-    Ok "Destino: $Dest"
-    Ok "Chaves:  $($Keys -join ', ')"
-    Ok ("Busca:  {0} | Modo: {1}" -f ($(if($recurse){'recursiva'}else{'nível atual'}), $(if($strict){'Estrito'}else{'Pasta=Tudo'})))
+    Ok ("Origem:  {0}" -f $Source)
+    Ok ("Destino: {0}" -f $Dest)
+    Ok ("Chaves:  {0}" -f ($Keys -join ', '))
+    Ok ("Busca:   {0} | Foco: {1}" -f ($(if($recurse){'recursiva'}else{'nível atual'}), $focus))
   } catch { Err $_.Exception.Message; return }
 
   $errors = 0
 
-  if($strict){
-    # -------- MODO ESTRITO --------
-    $dirEnum = if($recurse){ Get-ChildItem -LiteralPath $Source -Directory -Recurse -Force -ErrorAction SilentlyContinue }
-               else         { Get-ChildItem -LiteralPath $Source -Directory          -Force -ErrorAction SilentlyContinue }
-    $fileEnum = if($recurse){ Get-ChildItem -LiteralPath $Source -File -Recurse -Force -ErrorAction SilentlyContinue }
-                else         { Get-ChildItem -LiteralPath $Source -File          -Force -ErrorAction SilentlyContinue }
+  if($focus -eq 'Pastas'){
+    # -------- Foco: PASTAS -> copia PASTA INTEIRA (deepest) --------
+    $dirEnum = if($recurse){
+      Get-ChildItem -LiteralPath $Source -Directory -Recurse -Force -ErrorAction SilentlyContinue
+    } else {
+      Get-ChildItem -LiteralPath $Source -Directory          -Force -ErrorAction SilentlyContinue
+    }
+    $matched = @($dirEnum | Where-Object { $_.Name -match $Regex } | Select-Object -ExpandProperty FullName)
+    $deepest = Keep-DeepestDirs $matched
 
-    $dirs  = @($dirEnum  | Where-Object { $_.Name -match $Regex })
-    $files = @($fileEnum | Where-Object { $_.Name -match $Regex })
-
-    $dirRel = $dirs | ForEach-Object { $_.FullName.Substring($Source.Length).TrimStart('\') } | Sort-Object -Unique
-
-    Info ("Pastas que casam: {0} | Arquivos que casam: {1}" -f $dirRel.Count, $files.Count)
-    if($dirRel.Count -eq 0 -and $files.Count -eq 0){ Warn "Nada para copiar."; return }
+    Info ("Pastas casadas (deepest): {0}" -f $deepest.Count)
+    if($deepest.Count -eq 0){ Warn "Nada para copiar."; return }
     if(-not (AskYN "Prosseguir com a CÓPIA agora?")){ Warn "Operação cancelada."; return }
 
-    foreach($rel in $dirRel){
+    $RobocopyExe = Join-Path $env:SystemRoot "System32\robocopy.exe"
+    $roboArgs = @('/E','/COPY:DAT','/DCOPY:T','/Z','/R:1','/W:1','/MT:16','/XJ','/NFL','/NDL','/NP')
+
+    foreach($d in $deepest){
       try{
+        $rel    = $d.Substring($Source.Length).TrimStart('\')
         $dstDir = Join-Path $Dest $rel
-        New-Item -ItemType Directory -Path $dstDir -Force | Out-Null
-        Ok "Pasta criada (estrutura): $dstDir"
-      } catch { $errors++; Err "Falha ao criar pasta '$rel': $($_.Exception.Message)" }
+        if(-not (Test-Path -LiteralPath $dstDir)){ New-Item -ItemType Directory -Path $dstDir -Force | Out-Null }
+        Info ("Copiando PASTA inteira: {0}" -f $d)
+        $null = & $RobocopyExe $d $dstDir @roboArgs
+        if($LASTEXITCODE -ge 8){
+          Warn ("Robocopy falhou (ExitCode={0}) em {1}; usando Copy-Item" -f $LASTEXITCODE, $d)
+          Copy-Item -LiteralPath $d -Destination $dstDir -Recurse -Force -ErrorAction Stop
+        } else { Ok ("Pasta concluída: {0}" -f $d) }
+      } catch { $errors++; Err ("Falha em pasta '{0}': {1}" -f $d, $_.Exception.Message) }
     }
+  }
+  else {
+    # -------- Foco: ARQUIVOS -> copia SÓ ARQUIVOS que casam --------
+    $fileEnum = if($recurse){
+      Get-ChildItem -LiteralPath $Source -File -Recurse -Force -ErrorAction SilentlyContinue
+    } else {
+      Get-ChildItem -LiteralPath $Source -File          -Force -ErrorAction SilentlyContinue
+    }
+    $files = @($fileEnum | Where-Object { $_.Name -match $Regex })
+
+    Info ("Arquivos que casam: {0}" -f $files.Count)
+    if($files.Count -eq 0){ Warn "Nada para copiar."; return }
+    if(-not (AskYN "Prosseguir com a CÓPIA agora?")){ Warn "Operação cancelada."; return }
 
     foreach($f in $files){
       try{
@@ -100,69 +129,15 @@ function Run-Backup {
         $dstDir = if([string]::IsNullOrEmpty($subRel)){ $Dest } else { Join-Path $Dest $subRel }
         if(-not (Test-Path -LiteralPath $dstDir)){ New-Item -ItemType Directory -Path $dstDir -Force | Out-Null }
         Copy-Item -LiteralPath $f.FullName -Destination $dstDir -Force -ErrorAction Stop
-        Ok "Arquivo copiado: $($f.FullName)"
-      } catch { $errors++; Err "Falha '$($f.FullName)': $($_.Exception.Message)" }
-    }
-  }
-  else{
-    # -------- MODO PASTA=TUDO --------
-    $dirEnum = if($recurse){ Get-ChildItem -LiteralPath $Source -Directory -Recurse -Force -ErrorAction SilentlyContinue }
-               else         { Get-ChildItem -LiteralPath $Source -Directory          -Force -ErrorAction SilentlyContinue }
-    $matchedDirs = @($dirEnum | Where-Object { $_.Name -match $Regex })
-    $dirTop = Keep-TopMostDirs (@($matchedDirs | Select-Object -ExpandProperty FullName))
-
-    $fileEnum = if($recurse){ Get-ChildItem -LiteralPath $Source -File -Recurse -Force -ErrorAction SilentlyContinue }
-                else         { Get-ChildItem -LiteralPath $Source -File          -Force -ErrorAction SilentlyContinue }
-    $matchedFiles = @($fileEnum | Where-Object { $_.Name -match $Regex })
-
-    $dirSet = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-    foreach($d in $dirTop){ [void]$dirSet.Add($d) }
-
-    $filesOutside = @(
-      foreach($f in $matchedFiles){
-        $covered = $false
-        foreach($d in $dirSet){ if($f.FullName.StartsWith($d + '\')){ $covered = $true; break } }
-        if(-not $covered){ $f }
-      }
-    )
-
-    Info ("Pastas inteiras: {0} | Arquivos isolados: {1}" -f $dirTop.Count, $filesOutside.Count)
-    if($dirTop.Count -eq 0 -and $filesOutside.Count -eq 0){ Warn "Nada para copiar."; return }
-    if(-not (AskYN "Prosseguir com a CÓPIA agora?")){ Warn "Operação cancelada."; return }
-
-    $RobocopyExe = Join-Path $env:SystemRoot "System32\robocopy.exe"
-    $roboArgs = @('/E','/COPY:DAT','/DCOPY:T','/Z','/R:1','/W:1','/MT:16','/XJ','/NFL','/NDL','/NP')
-
-    foreach($d in $dirTop){
-      try{
-        $rel    = $d.Substring($Source.Length).TrimStart('\')
-        $dstDir = Join-Path $Dest $rel
-        if(-not (Test-Path -LiteralPath $dstDir)){ New-Item -ItemType Directory -Path $dstDir -Force | Out-Null }
-        Info "Copiando PASTA inteira: $d"
-        $null = & $RobocopyExe $d $dstDir @roboArgs
-        if($LASTEXITCODE -ge 8){
-          Warn "Robocopy falhou (ExitCode=$LASTEXITCODE) em $d; usando Copy-Item"
-          Copy-Item -LiteralPath $d -Destination $dstDir -Recurse -Force -ErrorAction Stop
-        } else { Ok "Pasta concluída: $d" }
-      } catch { $errors++; Err "Falha em pasta '$d': $($_.Exception.Message)" }
-    }
-
-    foreach($f in $filesOutside){
-      try{
-        $rel    = $f.FullName.Substring($Source.Length).TrimStart('\')
-        $subRel = Split-Path -Path $rel -Parent
-        $dstDir = if([string]::IsNullOrEmpty($subRel)){ $Dest } else { Join-Path $Dest $subRel }
-        if(-not (Test-Path -LiteralPath $dstDir)){ New-Item -ItemType Directory -Path $dstDir -Force | Out-Null }
-        Copy-Item -LiteralPath $f.FullName -Destination $dstDir -Force -ErrorAction Stop
-        Ok "Arquivo isolado copiado: $($f.FullName)"
-      } catch { $errors++; Err "Falha '$($f.FullName)': $($_.Exception.Message)" }
+        Ok ("Arquivo copiado: {0}" -f $f.FullName)
+      } catch { $errors++; Err ("Falha '{0}': {1}" -f $f.FullName, $_.Exception.Message) }
     }
   }
 
-  if($errors -gt 0){ Warn "Finalizado com $errors falha(s)." } else { Ok "Concluído sem falhas. 🎉" }
+  if($errors -gt 0){ Warn ("Finalizado com {0} falha(s)." -f $errors) } else { Ok "Concluído sem falhas. 🎉" }
 }
 
-# -------- Menu --------
+# ---------------- Menu ----------------
 do {
   try {
     ShowHeader
@@ -177,9 +152,9 @@ do {
     }
     if($opt -ne '0'){ Info "Pressione Enter para voltar ao menu..."; [void][System.Console]::ReadLine() }
   } catch {
-    Err "Erro: $($_.Exception.Message)"
+    Err ("Erro: {0}" -f $_.Exception.Message)
     Info "Pressione Enter para continuar..."
     [void][System.Console]::ReadLine()
   }
 } while ($true)
-# =========================================================================================
+# ============================================================================
