@@ -1,9 +1,4 @@
-# ============== SELETOR POR PALAVRAS-CHAVE (Cópia/Exclusão/Conferência) v3.2 ==============
-# [1] Copiar:  Foco "Pastas" -> copia PASTA INTEIRA (deepest) | "Arquivos" -> só os arquivos
-# [2] Excluir: Foco "Pastas" -> apaga PASTA INTEIRA (deepest) | "Arquivos" -> só os arquivos
-# [3] Conferir: verifica chaves no NOME (Pastas: só nos 4 primeiros chars | Arquivos: nome inteiro)
-# Observação: Exclusão é permanente no modo 2 (sem lixeira).
-# ===========================================================================================
+# ============== SELETOR POR PALAVRAS-CHAVE (Cópia/Exclusão/Conferência) v3.3 ==============
 
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $ErrorActionPreference = 'Stop'
@@ -16,29 +11,36 @@ function Err ([string]$m){ Write-Host "[x] $m"  -ForegroundColor Red }
 
 function Require-Path([string]$p,[string]$label){
   if([string]::IsNullOrWhiteSpace($p)){ throw "Caminho de $label não informado." }
-  (Resolve-Path -LiteralPath $p -ErrorAction Stop).Path.TrimEnd('\')
+  $resolved = (Resolve-Path -LiteralPath $p -ErrorAction Stop).Path
+  return $resolved.TrimEnd('\')
 }
 function Ensure-Dir([string]$p){
   if(-not (Test-Path -LiteralPath $p)){ New-Item -ItemType Directory -Path $p | Out-Null }
   (Resolve-Path -LiteralPath $p).Path.TrimEnd('\')
 }
 function ParseKeys([string]$raw){
-  $k = $raw -split '[,\;\r\n]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+  $k = $raw -split '[,\r\n;]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ }
   if($k.Count -eq 0){ throw "Nenhuma palavra-chave válida informada." }
   $k | Sort-Object -Unique
 }
 function Pattern([string[]]$keys){ '(' + (($keys | ForEach-Object {[Regex]::Escape($_)}) -join '|') + ')' }
-function PatternStart([string[]]$keys){ '^' + (Pattern $keys) }   # ancora no começo
-function AskYN([string]$q){ ($ans = Read-Host "$q (S/N)") -match '^[sS]' }
 
-# Apenas os 4 primeiros caracteres de um nome (para PASTAS)
+# Pastas: usar só os 4 primeiros caracteres do nome
 function First4([string]$s){
   if([string]::IsNullOrEmpty($s)){ return "" }
   $len = [Math]::Min(4, $s.Length)
   return $s.Substring(0, $len)
 }
 
-# Foco com prompt ajustado por ação
+# Pastas: CHAVE deve estar nos 4 primeiros chars e NÃO pode continuar com letra/dígito.
+# Ex.: chave '121' casa em '121 ' ou '121-' etc.; NÃO casa em '1213'.
+function PatternPrefixToken([string[]]$keys){
+  $union = ($keys | ForEach-Object {[Regex]::Escape($_)}) -join '|'
+  return '^(?:' + $union + ')(?![0-9A-Za-z])'
+}
+
+function AskYN([string]$q){ ($ans = Read-Host "$q (S/N)") -match '^[sS]' }
+
 function AskFocus([string]$acao){
   do{
     $txt = if($acao -eq 'Apagar'){
@@ -55,7 +57,6 @@ function AskFocus([string]$acao){
   } while ($true)
 }
 
-# Escopo da conferência
 function AskScopeCheck{
   do{
     $a = Read-Host "Escopo: [P]astas | [A]rquivos | [B]oth (ambos)"
@@ -68,7 +69,7 @@ function AskScopeCheck{
   } while ($true)
 }
 
-# Mantém apenas as PASTAS mais profundas (deepest) entre casadas aninhadas
+# Mantém apenas as PASTAS mais profundas (deepest)
 function Keep-DeepestDirs([string[]]$dirPaths){
   $kept = New-Object System.Collections.Generic.List[string]
   foreach($cur in ($dirPaths | Sort-Object Length -Descending)){
@@ -82,7 +83,7 @@ function Keep-DeepestDirs([string[]]$dirPaths){
 # ---------------- Cabeçalhos ----------------
 function ShowHeaderMain{
   Clear-Host
-  Write-Host "================ SELETOR POR PALAVRAS-CHAVE (v3.2) ================" -ForegroundColor Cyan
+  Write-Host "================ SELETOR POR PALAVRAS-CHAVE (v3.3) ================" -ForegroundColor Cyan
   Write-Host "[1] Copiar (backup seletivo)" -ForegroundColor Green
   Write-Host "[2] Excluir (apagamento seletivo - permanente)" -ForegroundColor Yellow
   Write-Host "[3] Conferir (verificar chaves presentes/ausentes)" -ForegroundColor Magenta
@@ -92,20 +93,20 @@ function ShowHeaderMain{
 function ShowHeaderCopy{
   Clear-Host
   Write-Host "============== BACKUP SELETIVO POR PALAVRAS-CHAVE (v2.4) =======" -ForegroundColor Cyan
-  Write-Host "Pastas -> só 4 primeiros chars do nome.  Arquivos -> nome inteiro."
+  Write-Host "Pastas -> só 4 primeiros chars (com limite de token).  Arquivos -> nome inteiro."
   Write-Host "==============================================================="
 }
 function ShowHeaderDelete{
   Clear-Host
   Write-Host "========== EXCLUSÃO SELETIVA POR PALAVRAS-CHAVE (v2.4) =========" -ForegroundColor Cyan
-  Write-Host "Pastas -> só 4 primeiros chars do nome.  Arquivos -> nome inteiro."
+  Write-Host "Pastas -> só 4 primeiros chars (com limite de token).  Arquivos -> nome inteiro."
   Write-Host "AÇÃO DESTRUTIVA! Sem lixeira. Confirme com atenção." -ForegroundColor Yellow
   Write-Host "==============================================================="
 }
 function ShowHeaderCheck{
   Clear-Host
-  Write-Host "================ CONFERÊNCIA POR PALAVRAS-CHAVE (v1.1) =================" -ForegroundColor Cyan
-  Write-Host "Pastas: confere só os 4 primeiros chars. Arquivos: nome inteiro."
+  Write-Host "================ CONFERÊNCIA POR PALAVRAS-CHAVE (v1.2) =================" -ForegroundColor Cyan
+  Write-Host "Pastas: confere só os 4 primeiros chars com limite de token. Arquivos: nome inteiro."
   Write-Host "Mostra chaves ENCONTRADAS e NÃO ENCONTRADAS (com amostras opcionais)."
   Write-Host "========================================================================"
 }
@@ -124,8 +125,8 @@ function Run-Backup {
     $Source = Require-Path $src "Origem"
     $Dest   = Ensure-Dir   $dst
     $Keys   = ParseKeys $kw
-    $RegexAny = Pattern $Keys
-    $RegexStart4 = PatternStart $Keys
+    $RegexAny   = Pattern $Keys
+    $RegexPfxTk = PatternPrefixToken $Keys
     Ok ("Origem:  {0}" -f $Source)
     Ok ("Destino: {0}" -f $Dest)
     Ok ("Chaves:  {0}" -f ($Keys -join ', '))
@@ -135,7 +136,7 @@ function Run-Backup {
   $errors = 0
 
   if($focus -eq 'Pastas'){
-    # -------- PASTAS -> match só nos 4 primeiros chars do nome --------
+    # PASTAS -> casa SOMENTE nos 4 primeiros chars com limite de token
     $dirEnum = if($recurse){
       Get-ChildItem -LiteralPath $Source -Directory -Recurse -Force -ErrorAction SilentlyContinue
     } else {
@@ -143,10 +144,7 @@ function Run-Backup {
     }
     $matched = @(
       $dirEnum |
-      Where-Object {
-        $pfx = First4 $_.Name
-        $pfx -match $RegexStart4
-      } |
+      Where-Object { (First4 $_.Name) -match $RegexPfxTk } |
       Select-Object -ExpandProperty FullName
     )
     $deepest = Keep-DeepestDirs $matched
@@ -173,7 +171,7 @@ function Run-Backup {
     }
   }
   else {
-    # -------- ARQUIVOS -> nome inteiro --------
+    # ARQUIVOS -> nome inteiro
     $fileEnum = if($recurse){
       Get-ChildItem -LiteralPath $Source -File -Recurse -Force -ErrorAction SilentlyContinue
     } else {
@@ -219,7 +217,7 @@ function Run-Delete {
     $Source = Require-Path $src "Origem"
     $Keys   = ParseKeys $kw
     $RegexAny   = Pattern $Keys
-    $RegexStart4 = PatternStart $Keys
+    $RegexPfxTk = PatternPrefixToken $Keys
     Info ("Origem:  {0}" -f $Source)
     Info ("Chaves:  {0}" -f ($Keys -join ', '))
     Info ("Busca:   {0} | Foco: {1}" -f ($(if($recurse){'recursiva'}else{'nível atual'}), $focus))
@@ -228,7 +226,6 @@ function Run-Delete {
   $errors = 0
 
   if($focus -eq 'Pastas'){
-    # -------- PASTAS -> 4 primeiros chars --------
     $dirEnum = if($recurse){
       Get-ChildItem -LiteralPath $Source -Directory -Recurse -Force -ErrorAction SilentlyContinue
     } else {
@@ -236,10 +233,7 @@ function Run-Delete {
     }
     $matched = @(
       $dirEnum |
-      Where-Object {
-        $pfx = First4 $_.Name
-        $pfx -match $RegexStart4
-      } |
+      Where-Object { (First4 $_.Name) -match $RegexPfxTk } |
       Select-Object -ExpandProperty FullName
     )
     $deepest = Keep-DeepestDirs $matched
@@ -260,7 +254,6 @@ function Run-Delete {
     }
   }
   else {
-    # -------- ARQUIVOS -> nome inteiro --------
     $fileEnum = if($recurse){
       Get-ChildItem -LiteralPath $Source -File -Recurse -Force -ErrorAction SilentlyContinue
     } else {
@@ -299,8 +292,7 @@ function Run-Check {
   try{
     $Base   = Require-Path $path "Caminho"
     $Keys   = ParseKeys $kw
-    $RegexAny    = Pattern $Keys
-    $RegexStart4 = PatternStart $Keys
+    $RegexAny = Pattern $Keys
     Ok ("Caminho: {0}" -f $Base)
     Ok ("Chaves:  {0}" -f ($Keys -join ', '))
     Ok ("Busca:   {0} | Escopo: {1}" -f ($(if($recurse){'recursiva'}else{'nível atual'}), $scope))
@@ -323,12 +315,8 @@ function Run-Check {
     }
   }
 
-  if(($scope -eq 'Pastas' -or $scope -eq 'Ambos') -and -not $dirs){
-    Warn "Nenhuma pasta encontrada no escopo/recursão definidos."
-  }
-  if(($scope -eq 'Arquivos' -or $scope -eq 'Ambos') -and -not $files){
-    Warn "Nenhum arquivo encontrado no escopo/recursão definidos."
-  }
+  if(($scope -eq 'Pastas' -or $scope -eq 'Ambos') -and -not $dirs){ Warn "Nenhuma pasta encontrada no escopo/recursão definidos." }
+  if(($scope -eq 'Arquivos' -or $scope -eq 'Ambos') -and -not $files){ Warn "Nenhum arquivo encontrado no escopo/recursão definidos." }
   if(-not $dirs -and -not $files){ return }
 
   $foundKeys   = New-Object System.Collections.Generic.List[string]
@@ -337,11 +325,11 @@ function Run-Check {
 
   foreach($k in $Keys){
     $rx = [Regex]::Escape($k)
+    $rxPrefix = '^' + $rx + '(?![0-9A-Za-z])'  # limite de token nos 4 primeiros chars
 
-    # Pastas: testa só primeiros 4 chars; Arquivos: nome inteiro
     $dirHits = @()
     if($dirs){
-      $dirHits = $dirs | Where-Object { (First4 $_.Name) -match ('^' + $rx) } | Select-Object -ExpandProperty Name
+      $dirHits = $dirs | Where-Object { (First4 $_.Name) -match $rxPrefix } | Select-Object -ExpandProperty Name
     }
 
     $fileHits = @()
@@ -385,9 +373,9 @@ do {
       '2' { Run-Delete }
       '3' { Run-Check  }
       '0' {
-           Info "Saindo..."
-           Start-Sleep -Milliseconds 120
-           exit 0
+        Info "Saindo..."
+        Start-Sleep -Milliseconds 120
+        exit 0
       }
       default { Warn "Opção inválida." }
     }
@@ -401,4 +389,5 @@ do {
     [void][System.Console]::ReadLine()
   }
 } while ($true)
+
 # ===========================================================================================
