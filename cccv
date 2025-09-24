@@ -1,8 +1,9 @@
-# ============== SELETOR POR PALAVRAS-CHAVE (Cópia/Exclusão) v3.0 ==============
+# ============== SELETOR POR PALAVRAS-CHAVE (Cópia/Exclusão/Conferência) v3.2 ==============
 # [1] Copiar:  Foco "Pastas" -> copia PASTA INTEIRA (deepest) | "Arquivos" -> só os arquivos
 # [2] Excluir: Foco "Pastas" -> apaga PASTA INTEIRA (deepest) | "Arquivos" -> só os arquivos
-# É CÓPIA (não apaga) no modo 1. Exclusão é permanente no modo 2 (sem lixeira).
-# ==============================================================================
+# [3] Conferir: verifica chaves no NOME (Pastas: só nos 4 primeiros chars | Arquivos: nome inteiro)
+# Observação: Exclusão é permanente no modo 2 (sem lixeira).
+# ===========================================================================================
 
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $ErrorActionPreference = 'Stop'
@@ -27,7 +28,15 @@ function ParseKeys([string]$raw){
   $k | Sort-Object -Unique
 }
 function Pattern([string[]]$keys){ '(' + (($keys | ForEach-Object {[Regex]::Escape($_)}) -join '|') + ')' }
+function PatternStart([string[]]$keys){ '^' + (Pattern $keys) }   # ancora no começo
 function AskYN([string]$q){ ($ans = Read-Host "$q (S/N)") -match '^[sS]' }
+
+# Apenas os 4 primeiros caracteres de um nome (para PASTAS)
+function First4([string]$s){
+  if([string]::IsNullOrEmpty($s)){ return "" }
+  $len = [Math]::Min(4, $s.Length)
+  return $s.Substring(0, $len)
+}
 
 # Foco com prompt ajustado por ação
 function AskFocus([string]$acao){
@@ -46,6 +55,19 @@ function AskFocus([string]$acao){
   } while ($true)
 }
 
+# Escopo da conferência
+function AskScopeCheck{
+  do{
+    $a = Read-Host "Escopo: [P]astas | [A]rquivos | [B]oth (ambos)"
+    switch -Regex ($a){
+      '^[pP]' { return 'Pastas' }
+      '^[aA]' { return 'Arquivos' }
+      '^[bB]' { return 'Ambos' }
+      default { Warn "Opção inválida. Use P, A ou B." }
+    }
+  } while ($true)
+}
+
 # Mantém apenas as PASTAS mais profundas (deepest) entre casadas aninhadas
 function Keep-DeepestDirs([string[]]$dirPaths){
   $kept = New-Object System.Collections.Generic.List[string]
@@ -60,24 +82,32 @@ function Keep-DeepestDirs([string[]]$dirPaths){
 # ---------------- Cabeçalhos ----------------
 function ShowHeaderMain{
   Clear-Host
-  Write-Host "================ SELETOR POR PALAVRAS-CHAVE (v3.0) ================" -ForegroundColor Cyan
+  Write-Host "================ SELETOR POR PALAVRAS-CHAVE (v3.2) ================" -ForegroundColor Cyan
   Write-Host "[1] Copiar (backup seletivo)" -ForegroundColor Green
   Write-Host "[2] Excluir (apagamento seletivo - permanente)" -ForegroundColor Yellow
+  Write-Host "[3] Conferir (verificar chaves presentes/ausentes)" -ForegroundColor Magenta
   Write-Host "[0] Sair"
   Write-Host "===================================================================="
 }
 function ShowHeaderCopy{
   Clear-Host
   Write-Host "============== BACKUP SELETIVO POR PALAVRAS-CHAVE (v2.4) =======" -ForegroundColor Cyan
-  Write-Host "Pastas -> copia pasta inteira (deepest).  Arquivos -> só arquivos."
+  Write-Host "Pastas -> só 4 primeiros chars do nome.  Arquivos -> nome inteiro."
   Write-Host "==============================================================="
 }
 function ShowHeaderDelete{
   Clear-Host
   Write-Host "========== EXCLUSÃO SELETIVA POR PALAVRAS-CHAVE (v2.4) =========" -ForegroundColor Cyan
-  Write-Host "Pastas -> APAGA pasta inteira (deepest).  Arquivos -> APAGA só arquivos."
+  Write-Host "Pastas -> só 4 primeiros chars do nome.  Arquivos -> nome inteiro."
   Write-Host "AÇÃO DESTRUTIVA! Sem lixeira. Confirme com atenção." -ForegroundColor Yellow
   Write-Host "==============================================================="
+}
+function ShowHeaderCheck{
+  Clear-Host
+  Write-Host "================ CONFERÊNCIA POR PALAVRAS-CHAVE (v1.1) =================" -ForegroundColor Cyan
+  Write-Host "Pastas: confere só os 4 primeiros chars. Arquivos: nome inteiro."
+  Write-Host "Mostra chaves ENCONTRADAS e NÃO ENCONTRADAS (com amostras opcionais)."
+  Write-Host "========================================================================"
 }
 
 # ---------------- Programa 1: COPIAR ----------------
@@ -94,7 +124,8 @@ function Run-Backup {
     $Source = Require-Path $src "Origem"
     $Dest   = Ensure-Dir   $dst
     $Keys   = ParseKeys $kw
-    $Regex  = Pattern $Keys
+    $RegexAny = Pattern $Keys
+    $RegexStart4 = PatternStart $Keys
     Ok ("Origem:  {0}" -f $Source)
     Ok ("Destino: {0}" -f $Dest)
     Ok ("Chaves:  {0}" -f ($Keys -join ', '))
@@ -104,13 +135,20 @@ function Run-Backup {
   $errors = 0
 
   if($focus -eq 'Pastas'){
-    # -------- PASTAS -> copia PASTA INTEIRA (deepest) --------
+    # -------- PASTAS -> match só nos 4 primeiros chars do nome --------
     $dirEnum = if($recurse){
       Get-ChildItem -LiteralPath $Source -Directory -Recurse -Force -ErrorAction SilentlyContinue
     } else {
       Get-ChildItem -LiteralPath $Source -Directory          -Force -ErrorAction SilentlyContinue
     }
-    $matched = @($dirEnum | Where-Object { $_.Name -match $Regex } | Select-Object -ExpandProperty FullName)
+    $matched = @(
+      $dirEnum |
+      Where-Object {
+        $pfx = First4 $_.Name
+        $pfx -match $RegexStart4
+      } |
+      Select-Object -ExpandProperty FullName
+    )
     $deepest = Keep-DeepestDirs $matched
 
     Info ("Pastas casadas (deepest): {0}" -f $deepest.Count)
@@ -135,13 +173,13 @@ function Run-Backup {
     }
   }
   else {
-    # -------- ARQUIVOS -> copia SÓ ARQUIVOS que casam --------
+    # -------- ARQUIVOS -> nome inteiro --------
     $fileEnum = if($recurse){
       Get-ChildItem -LiteralPath $Source -File -Recurse -Force -ErrorAction SilentlyContinue
     } else {
       Get-ChildItem -LiteralPath $Source -File          -Force -ErrorAction SilentlyContinue
     }
-    $files = @($fileEnum | Where-Object { $_.Name -match $Regex })
+    $files = @($fileEnum | Where-Object { $_.Name -match $RegexAny })
 
     Info ("Arquivos que casam: {0}" -f $files.Count)
     if($files.Count -eq 0){ Warn "Nada para copiar."; return }
@@ -163,7 +201,6 @@ function Run-Backup {
 }
 
 # ---------------- Programa 2: EXCLUIR ----------------
-# Confirmação simples (apenas S/N)
 function Confirm-Deletion([int]$qtdPastas,[int]$qtdArquivos){
   Write-Host ""
   Write-Host ("Resumo: Pastas a apagar: {0} | Arquivos a apagar: {1}" -f $qtdPastas,$qtdArquivos) -ForegroundColor Yellow
@@ -181,7 +218,8 @@ function Run-Delete {
   try{
     $Source = Require-Path $src "Origem"
     $Keys   = ParseKeys $kw
-    $Regex  = Pattern $Keys
+    $RegexAny   = Pattern $Keys
+    $RegexStart4 = PatternStart $Keys
     Info ("Origem:  {0}" -f $Source)
     Info ("Chaves:  {0}" -f ($Keys -join ', '))
     Info ("Busca:   {0} | Foco: {1}" -f ($(if($recurse){'recursiva'}else{'nível atual'}), $focus))
@@ -190,13 +228,20 @@ function Run-Delete {
   $errors = 0
 
   if($focus -eq 'Pastas'){
-    # -------- PASTAS -> APAGA PASTA INTEIRA (deepest) --------
+    # -------- PASTAS -> 4 primeiros chars --------
     $dirEnum = if($recurse){
       Get-ChildItem -LiteralPath $Source -Directory -Recurse -Force -ErrorAction SilentlyContinue
     } else {
       Get-ChildItem -LiteralPath $Source -Directory          -Force -ErrorAction SilentlyContinue
     }
-    $matched = @($dirEnum | Where-Object { $_.Name -match $Regex } | Select-Object -ExpandProperty FullName)
+    $matched = @(
+      $dirEnum |
+      Where-Object {
+        $pfx = First4 $_.Name
+        $pfx -match $RegexStart4
+      } |
+      Select-Object -ExpandProperty FullName
+    )
     $deepest = Keep-DeepestDirs $matched
 
     Info ("Pastas casadas (deepest): {0}" -f $deepest.Count)
@@ -215,13 +260,13 @@ function Run-Delete {
     }
   }
   else {
-    # -------- ARQUIVOS -> APAGA SÓ ARQUIVOS que casam --------
+    # -------- ARQUIVOS -> nome inteiro --------
     $fileEnum = if($recurse){
       Get-ChildItem -LiteralPath $Source -File -Recurse -Force -ErrorAction SilentlyContinue
     } else {
       Get-ChildItem -LiteralPath $Source -File          -Force -ErrorAction SilentlyContinue
     }
-    $files = @($fileEnum | Where-Object { $_.Name -match $Regex })
+    $files = @($fileEnum | Where-Object { $_.Name -match $RegexAny })
 
     Info ("Arquivos que casam: {0}" -f $files.Count)
     if($files.Count -eq 0){ Warn "Nada para apagar."; return }
@@ -242,6 +287,94 @@ function Run-Delete {
   if($errors -gt 0){ Warn ("Finalizado com {0} falha(s)." -f $errors) } else { Ok "Concluído sem falhas. 🎉" }
 }
 
+# ---------------- Programa 3: CONFERIR ----------------
+function Run-Check {
+  ShowHeaderCheck
+
+  $path = Read-Host "Informe o CAMINHO a conferir (ex.: C:\Destino)"
+  $kw   = Read-Host "Informe as PALAVRAS-CHAVE (ex.: 1111,2222,3333)"
+  $recurse = AskYN "Varrer subpastas?"
+  $scope   = AskScopeCheck
+
+  try{
+    $Base   = Require-Path $path "Caminho"
+    $Keys   = ParseKeys $kw
+    $RegexAny    = Pattern $Keys
+    $RegexStart4 = PatternStart $Keys
+    Ok ("Caminho: {0}" -f $Base)
+    Ok ("Chaves:  {0}" -f ($Keys -join ', '))
+    Ok ("Busca:   {0} | Escopo: {1}" -f ($(if($recurse){'recursiva'}else{'nível atual'}), $scope))
+  } catch { Err $_.Exception.Message; return }
+
+  $dirs  = @()
+  $files = @()
+  if($scope -in @('Pastas','Ambos')){
+    $dirs = if($recurse){
+      Get-ChildItem -LiteralPath $Base -Directory -Recurse -Force -ErrorAction SilentlyContinue
+    } else {
+      Get-ChildItem -LiteralPath $Base -Directory          -Force -ErrorAction SilentlyContinue
+    }
+  }
+  if($scope -in @('Arquivos','Ambos')){
+    $files = if($recurse){
+      Get-ChildItem -LiteralPath $Base -File -Recurse -Force -ErrorAction SilentlyContinue
+    } else {
+      Get-ChildItem -LiteralPath $Base -File          -Force -ErrorAction SilentlyContinue
+    }
+  }
+
+  if(($scope -eq 'Pastas' -or $scope -eq 'Ambos') -and -not $dirs){
+    Warn "Nenhuma pasta encontrada no escopo/recursão definidos."
+  }
+  if(($scope -eq 'Arquivos' -or $scope -eq 'Ambos') -and -not $files){
+    Warn "Nenhum arquivo encontrado no escopo/recursão definidos."
+  }
+  if(-not $dirs -and -not $files){ return }
+
+  $foundKeys   = New-Object System.Collections.Generic.List[string]
+  $missingKeys = New-Object System.Collections.Generic.List[string]
+  $samplesByKey = @{}
+
+  foreach($k in $Keys){
+    $rx = [Regex]::Escape($k)
+
+    # Pastas: testa só primeiros 4 chars; Arquivos: nome inteiro
+    $dirHits = @()
+    if($dirs){
+      $dirHits = $dirs | Where-Object { (First4 $_.Name) -match ('^' + $rx) } | Select-Object -ExpandProperty Name
+    }
+
+    $fileHits = @()
+    if($files){
+      $fileHits = $files | Where-Object { $_.Name -match $rx } | Select-Object -ExpandProperty Name
+    }
+
+    $hits = @($dirHits + $fileHits)
+    if($hits.Count -gt 0){
+      [void]$foundKeys.Add($k)
+      $samplesByKey[$k] = ($hits | Select-Object -Unique -First 10)
+    } else {
+      [void]$missingKeys.Add($k)
+    }
+  }
+
+  Write-Host ""
+  Write-Host "==================== RESULTADO DA CONFERÊNCIA ====================" -ForegroundColor Magenta
+  Write-Host ("Chaves ENCONTRADAS: {0}" -f $foundKeys.Count) -ForegroundColor Green
+  if($foundKeys.Count -gt 0){ Write-Host (" - {0}" -f ($foundKeys -join ', ')) -ForegroundColor DarkGreen }
+  Write-Host ("Chaves NÃO ENCONTRADAS: {0}" -f $missingKeys.Count) -ForegroundColor Yellow
+  if($missingKeys.Count -gt 0){ Write-Host (" - {0}" -f ($missingKeys -join ', ')) -ForegroundColor DarkYellow }
+
+  if(($foundKeys.Count -gt 0) -and (AskYN "Deseja ver AMOSTRAS de itens casados por chave?")){
+    foreach($k in $foundKeys){
+      Write-Host ("--- Amostras para chave '{0}':" -f $k) -ForegroundColor Cyan
+      foreach($s in $samplesByKey[$k]){ Write-Host ("   • {0}" -f $s) }
+    }
+  }
+
+  Ok "Conferência concluída. ✅"
+}
+
 # ---------------- Menu principal ----------------
 do {
   try {
@@ -250,10 +383,11 @@ do {
     switch($opt){
       '1' { Run-Backup }
       '2' { Run-Delete }
+      '3' { Run-Check  }
       '0' {
            Info "Saindo..."
            Start-Sleep -Milliseconds 120
-           exit 0     # fecha o processo do PowerShell
+           exit 0
       }
       default { Warn "Opção inválida." }
     }
@@ -267,4 +401,4 @@ do {
     [void][System.Console]::ReadLine()
   }
 } while ($true)
-# ==============================================================================
+# ===========================================================================================
