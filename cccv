@@ -1,4 +1,4 @@
-# ============== SELETOR POR PALAVRAS-CHAVE (Cópia/Exclusão/Conferência/Relatório) v3.7 ==============
+# ============== SELETOR POR PALAVRAS-CHAVE (Cópia/Exclusão/Conferência/Relatório) v3.8 ==============
 
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $ErrorActionPreference = 'Stop'
@@ -200,14 +200,19 @@ function Remove-DirSmart([string]$dir){
 }
 
 # ==================== Módulo [4] RELATÓRIO POR PREFIXO (4 primeiros chars) ====================
-# Funções específicas do relatório (sem conflitos com as já existentes)
+# Regra igual aos outros modos: âncora no início + limite de token até o 4º char
 function PrefixMatch([string]$prefix,[string]$key){
   if([string]::IsNullOrWhiteSpace($key)){ return $false }
-  $i = $prefix.IndexOf($key, 0, [System.StringComparison]::OrdinalIgnoreCase)
-  if($i -lt 0){ return $false }
-  $j = $i + $key.Length
-  if($j -gt $prefix.Length){ return $false }                         # precisa caber nos 4 chars
-  if($j -lt $prefix.Length){ $next = $prefix[$j]; if([char]::IsLetterOrDigit($next)){ return $false } }
+  # precisa começar no início e caber dentro dos 4 primeiros caracteres
+  if($key.Length -gt 4){ return $false }
+  if($prefix.Length -lt $key.Length){ return $false }
+  if([string]::Compare($prefix.Substring(0, $key.Length), $key, $true) -ne 0){ return $false }
+  # limite de token: se ainda estiver dentro dos 4 e houver próximo char, ele NÃO pode ser letra/dígito
+  $j = $key.Length
+  if($j -lt 4 -and $prefix.Length -gt $j){
+    $next = $prefix[$j]
+    if([char]::IsLetterOrDigit($next)){ return $false }
+  }
   return $true
 }
 function AnyKeyMatches([string]$prefix,[string[]]$keys){
@@ -292,7 +297,7 @@ function Run-Report {
 # ---------------- Cabeçalhos ----------------
 function ShowHeaderMain{
   Clear-Host
-  Write-Host "================ SELETOR POR PALAVRAS-CHAVE (v3.7) ================" -ForegroundColor Cyan
+  Write-Host "================ SELETOR POR PALAVRAS-CHAVE (v3.8) ================" -ForegroundColor Cyan
   Write-Host "[1] Copiar (backup seletivo)" -ForegroundColor Green
   Write-Host "[2] Excluir (apagamento seletivo - permanente)" -ForegroundColor Yellow
   Write-Host "[3] Conferir (verificar chaves presentes/ausentes)" -ForegroundColor Magenta
@@ -475,7 +480,7 @@ function Run-Check {
   Write-Host ""
   Write-Host "==================== RESULTADO DA CONFERÊNCIA ====================" -ForegroundColor Magenta
   Write-Host ("Chaves ENCONTRADAS: {0}" -f $foundKeys.Count) -ForegroundColor Green
-  if($foundKeys.Count -gt 0){ Write-Host (" - {0}" -f ($foundKeys -join ', ')) -ForegroundColor DarkGreen }
+  if($foundKeys.Count -gt 0){ Write-Host (" - " + ($foundKeys -join ", ")) -ForegroundColor DarkGreen }
   Write-Host ("Chaves NÃO ENCONTRADAS: {0}" -f $missingKeys.Count) -ForegroundColor Yellow
   if($missingKeys.Count -gt 0){ Write-Host (" - " + ($missingKeys -join ", ")) -ForegroundColor DarkYellow }
   if(($foundKeys.Count -gt 0) -and (AskYN "Deseja ver AMOSTRAS de itens casados por chave?")){
