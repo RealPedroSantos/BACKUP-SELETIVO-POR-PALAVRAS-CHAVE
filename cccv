@@ -200,14 +200,11 @@ function Remove-DirSmart([string]$dir){
 }
 
 # ==================== Módulo [4] RELATÓRIO POR PREFIXO (4 primeiros chars) ====================
-# Regra igual aos outros modos: âncora no início + limite de token até o 4º char
 function PrefixMatch([string]$prefix,[string]$key){
   if([string]::IsNullOrWhiteSpace($key)){ return $false }
-  # precisa começar no início e caber dentro dos 4 primeiros caracteres
   if($key.Length -gt 4){ return $false }
   if($prefix.Length -lt $key.Length){ return $false }
   if([string]::Compare($prefix.Substring(0, $key.Length), $key, $true) -ne 0){ return $false }
-  # limite de token: se ainda estiver dentro dos 4 e houver próximo char, ele NÃO pode ser letra/dígito
   $j = $key.Length
   if($j -lt 4 -and $prefix.Length -gt $j){
     $next = $prefix[$j]
@@ -302,6 +299,7 @@ function ShowHeaderMain{
   Write-Host "[2] Excluir (apagamento seletivo - permanente)" -ForegroundColor Yellow
   Write-Host "[3] Conferir (verificar chaves presentes/ausentes)" -ForegroundColor Magenta
   Write-Host "[4] Relatório por Prefixo (TXT no Desktop)" -ForegroundColor White
+  Write-Host "[5] Copiar TUDO (sem palavra-chave)" -ForegroundColor Green
   Write-Host "[0] Sair"
   Write-Host "===================================================================="
 }
@@ -326,8 +324,14 @@ function ShowHeaderCheck{
   Write-Host "Mostra chaves ENCONTRADAS e NÃO ENCONTRADAS (com amostras opcionais)."
   Write-Host "========================================================================"
 }
+function ShowHeaderCopyAll{
+  Clear-Host
+  Write-Host "============== CÓPIA COMPLETA (SEM PALAVRA-CHAVE) =============" -ForegroundColor Cyan
+  Write-Host "Copia TODO o conteúdo da ORIGEM para o DESTINO usando robocopy."
+  Write-Host "==============================================================="
+}
 
-# ---------------- Programa 1: COPIAR ----------------
+# ---------------- Programa 1: COPIAR (SELETIVO) ----------------
 function Run-Backup {
   ShowHeaderCopy
   $src = Read-Host "Informe a ORIGEM (ex.: C:\A)"
@@ -492,6 +496,47 @@ function Run-Check {
   Ok "Conferência concluída. ✅"
 }
 
+# ---------------- Programa 5: CÓPIA COMPLETA (SEM PALAVRA-CHAVE) ----------------
+function Run-CopyAll {
+  ShowHeaderCopyAll
+  $src = Read-Host "Informe a ORIGEM (ex.: C:\A)"
+  $dst = Read-Host "Informe o DESTINO (ex.: C:\B)"
+
+  try{
+    $Source = Require-Path $src "Origem"
+    $Dest   = Ensure-Dir   $dst
+    Ok ("Origem:  {0}" -f $Source)
+    Ok ("Destino: {0}" -f $Dest)
+  } catch {
+    Err $_.Exception.Message
+    return
+  }
+
+  if(-not (AskYN "Confirmar CÓPIA COMPLETA de TODO o conteúdo da ORIGEM para o DESTINO?")){
+    Warn "Operação cancelada."
+    return
+  }
+
+  $RobocopyExe = Join-Path $env:SystemRoot "System32\robocopy.exe"
+  $roboArgs = @('/E','/COPY:DAT','/DCOPY:T','/Z','/R:1','/W:1','/MT:16','/XJ','/NFL','/NDL','/NP')
+
+  Info "Iniciando cópia completa com Robocopy..."
+  $null = & $RobocopyExe $Source $Dest @roboArgs
+  $code = $LASTEXITCODE
+
+  if($code -ge 8){
+    Warn ("Robocopy retornou ExitCode={0}. Tentando fallback com Copy-Item..." -f $code)
+    try{
+      Copy-Item -Path (Join-Path $Source '*') -Destination $Dest -Recurse -Force -ErrorAction Stop
+      Ok "Cópia concluída via Copy-Item."
+    } catch {
+      Err ("Falha na cópia completa: {0}" -f $_.Exception.Message)
+    }
+  } else {
+    Ok ("Cópia concluída (Robocopy ExitCode={0})." -f $code)
+  }
+}
+
 # ---------------- Menu principal ----------------
 do {
   try {
@@ -502,6 +547,7 @@ do {
       '2' { Run-Delete }
       '3' { Run-Check  }
       '4' { Run-Report }
+      '5' { Run-CopyAll }
       '0' { Info "Saindo..."; Start-Sleep -Milliseconds 120; exit 0 }
       default { Warn "Opção inválida." }
     }
