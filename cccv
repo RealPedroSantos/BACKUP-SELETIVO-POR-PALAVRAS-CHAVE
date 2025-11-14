@@ -1,4 +1,4 @@
-# ============== SELETOR POR PALAVRAS-CHAVE (Cópia/Exclusão/Conferência/Relatório) v3.8 ==============
+# ============== SELETOR POR PALAVRAS-CHAVE (Cópia/Exclusão/Conferência/Relatório) v3.8+ ==============
 
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $ErrorActionPreference = 'Stop'
@@ -300,6 +300,7 @@ function ShowHeaderMain{
   Write-Host "[3] Conferir (verificar chaves presentes/ausentes)" -ForegroundColor Magenta
   Write-Host "[4] Relatório por Prefixo (TXT no Desktop)" -ForegroundColor White
   Write-Host "[5] Copiar TUDO (sem palavra-chave)" -ForegroundColor Green
+  Write-Host "[6] Apagar TUDO (sem palavra-chave)" -ForegroundColor Red
   Write-Host "[0] Sair"
   Write-Host "===================================================================="
 }
@@ -329,6 +330,14 @@ function ShowHeaderCopyAll{
   Write-Host "============== CÓPIA COMPLETA (SEM PALAVRA-CHAVE) =============" -ForegroundColor Cyan
   Write-Host "Copia TODO o conteúdo da ORIGEM para o DESTINO usando robocopy."
   Write-Host "==============================================================="
+}
+function ShowHeaderDeleteAll{
+  Clear-Host
+  Write-Host "================ APAGAR TUDO (SEM PALAVRA-CHAVE) ================" -ForegroundColor Red
+  Write-Host "APAGA TODO o conteúdo de um caminho informado (arquivos + pastas)."
+  Write-Host "Usa o mesmo modo robusto de exclusão (Remove-FileSmart/Remove-DirSmart)."
+  Write-Host "CUIDADO: operação destrutiva e recursiva."
+  Write-Host "=================================================================="
 }
 
 # ---------------- Programa 1: COPIAR (SELETIVO) ----------------
@@ -393,7 +402,7 @@ function Run-Backup {
   if($errors -gt 0){ Warn ("Finalizado com {0} falha(s)." -f $errors) } else { Ok "Concluído sem falhas. 🎉" }
 }
 
-# ---------------- Programa 2: EXCLUIR (ROBUSTO) ----------------
+# ---------------- Programa 2: EXCLUIR (ROBUSTO / SELETIVO) ----------------
 function Confirm-Deletion([int]$qtdPastas,[int]$qtdArquivos){
   Write-Host ""
   Write-Host ("Resumo: Pastas a apagar: {0} | Arquivos a apagar: {1}" -f $qtdPastas,$qtdArquivos) -ForegroundColor Yellow
@@ -537,6 +546,77 @@ function Run-CopyAll {
   }
 }
 
+# ---------------- Programa 6: APAGAR TUDO (SEM PALAVRA-CHAVE) ----------------
+function Run-DeleteAll {
+  ShowHeaderDeleteAll
+  $path = Read-Host "Informe o CAMINHO onde será apagado TUDO (ex.: C:\Temp\Lixeira)"
+
+  try{
+    $Base = Require-Path $path "Caminho"
+
+    # proteção contra raiz de drive (C:\, D:\, etc.)
+    if($Base -match '^[A-Za-z]:\\$'){
+      Err "Por segurança, não é permitido apagar diretamente a RAIZ de uma unidade ($Base)."
+      return
+    }
+
+    Ok ("Caminho alvo: {0}" -f $Base)
+  } catch {
+    Err $_.Exception.Message
+    return
+  }
+
+  if(-not (AskYN "Confirmar APAGAR TUDO dentro desse caminho (recursivo)?")){
+    Warn "Operação cancelada."
+    return
+  }
+
+  $errors = 0
+
+  # 1) Apagar todos os ARQUIVOS primeiro
+  $files = Get-ChildItem -LiteralPath $Base -File -Recurse -Force -ErrorAction SilentlyContinue
+  Info ("Arquivos a apagar: {0}" -f $files.Count)
+  foreach($f in $files){
+    try{
+      Write-Host ("Apagando ARQUIVO: {0}" -f $f.FullName)
+      Remove-FileSmart $f.FullName
+    } catch {
+      $errors++
+      Err ("Falha ao apagar arquivo '{0}': {1}" -f $f.FullName, $_.Exception.Message)
+    }
+  }
+
+  # 2) Apagar todas as PASTAS internas (da mais profunda pra mais rasa)
+  $dirs = Get-ChildItem -LiteralPath $Base -Directory -Recurse -Force -ErrorAction SilentlyContinue | Sort-Object FullName -Descending
+  Info ("Pastas internas a apagar: {0}" -f $dirs.Count)
+  foreach($d in $dirs){
+    try{
+      Write-Host ("Apagando PASTA: {0}" -f $d.FullName)
+      Remove-DirSmart $d.FullName
+    } catch {
+      $errors++
+      Err ("Falha ao apagar pasta '{0}': {1}" -f $d.FullName, $_.Exception.Message)
+    }
+  }
+
+  # 3) Pergunta se quer apagar também a pasta raiz
+  if(AskYN ("Deseja também apagar a PASTA RAIZ '{0}'?" -f $Base)){
+    try{
+      Write-Host ("Apagando PASTA RAIZ: {0}" -f $Base)
+      Remove-DirSmart $Base
+    } catch {
+      $errors++
+      Err ("Falha ao apagar a pasta raiz '{0}': {1}" -f $Base, $_.Exception.Message)
+    }
+  }
+
+  if($errors -gt 0){
+    Warn ("Finalizado com {0} falha(s)." -f $errors)
+  } else {
+    Ok "Apagado com sucesso. ✅"
+  }
+}
+
 # ---------------- Menu principal ----------------
 do {
   try {
@@ -548,6 +628,7 @@ do {
       '3' { Run-Check  }
       '4' { Run-Report }
       '5' { Run-CopyAll }
+      '6' { Run-DeleteAll }
       '0' { Info "Saindo..."; Start-Sleep -Milliseconds 120; exit 0 }
       default { Warn "Opção inválida." }
     }
