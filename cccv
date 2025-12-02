@@ -1,4 +1,4 @@
-# ============== SELETOR POR PALAVRAS-CHAVE (Cópia/Exclusão/Conferência/Relatório) v3.8+ ==============
+# ============== SELETOR POR PALAVRAS-CHAVE (Cópia/Exclusão/Conferência/Relatório) v3.9+ ==============
 
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $ErrorActionPreference = 'Stop'
@@ -294,13 +294,14 @@ function Run-Report {
 # ---------------- Cabeçalhos ----------------
 function ShowHeaderMain{
   Clear-Host
-  Write-Host "================ SELETOR POR PALAVRAS-CHAVE (v3.8) ================" -ForegroundColor Cyan
+  Write-Host "================ SELETOR POR PALAVRAS-CHAVE (v3.9) ================" -ForegroundColor Cyan
   Write-Host "[1] Copiar (backup seletivo)" -ForegroundColor Green
   Write-Host "[2] Excluir (apagamento seletivo - permanente)" -ForegroundColor Yellow
   Write-Host "[3] Conferir (verificar chaves presentes/ausentes)" -ForegroundColor Magenta
   Write-Host "[4] Relatório por Prefixo (TXT no Desktop)" -ForegroundColor White
   Write-Host "[5] Copiar TUDO (sem palavra-chave)" -ForegroundColor Green
   Write-Host "[6] Apagar TUDO (sem palavra-chave)" -ForegroundColor Red
+  Write-Host "[7] Corrigir pesquisa do Windows (Search/Menu Iniciar)" -ForegroundColor Cyan
   Write-Host "[0] Sair"
   Write-Host "===================================================================="
 }
@@ -338,6 +339,14 @@ function ShowHeaderDeleteAll{
   Write-Host "Usa o mesmo modo robusto de exclusão (Remove-FileSmart/Remove-DirSmart)."
   Write-Host "CUIDADO: operação destrutiva e recursiva."
   Write-Host "=================================================================="
+}
+function ShowHeaderFixSearch{
+  Clear-Host
+  Write-Host "========== CORREÇÃO DA PESQUISA / MENU INICIAR (Windows Search) =========" -ForegroundColor Cyan
+  Write-Host "Ajusta o serviço Windows Search, re-registra apps do menu iniciar" -ForegroundColor Yellow
+  Write-Host "e força o componente de entrada de texto (ctfmon.exe)." -ForegroundColor Yellow
+  Write-Host "Use em Windows 10/11. Recomenda-se reiniciar após o procedimento."
+  Write-Host "======================================================================="
 }
 
 # ---------------- Programa 1: COPIAR (SELETIVO) ----------------
@@ -617,6 +626,88 @@ function Run-DeleteAll {
   }
 }
 
+# ---------------- Programa 7: CORRIGIR PESQUISA DO WINDOWS ----------------
+function Run-FixSearch {
+  ShowHeaderFixSearch
+
+  if(-not (AskYN "Deseja tentar corrigir a busca do Windows neste computador?")){
+    Warn "Operação cancelada."
+    return
+  }
+
+  $errors = 0
+
+  # 1) Ajustar e reiniciar o serviço Windows Search (WSearch)
+  try{
+    Info "Ajustando serviço Windows Search (WSearch) para Inicialização Automática..."
+    Set-Service -Name WSearch -StartupType Automatic -ErrorAction Stop
+    Info "Reiniciando serviço Windows Search..."
+    Restart-Service WSearch -ErrorAction Stop
+    Ok "Serviço Windows Search reiniciado com sucesso."
+  } catch {
+    $errors++
+    Err ("Falha ao ajustar/reiniciar WSearch: {0}" -f $_.Exception.Message)
+  }
+
+  # 2) Re-registrar pacotes de Shell / Menu Iniciar / Busca
+  $packages = @(
+    '*StartMenuExperienceHost*',
+    '*ShellExperienceHost*',
+    '*Windows.Search*'
+  )
+
+  foreach($pattern in $packages){
+    try{
+      Info ("Re-registrando pacote {0}..." -f $pattern)
+      $pkg = Get-AppxPackage -AllUsers $pattern -ErrorAction SilentlyContinue
+      if(-not $pkg){
+        Warn ("Pacote não encontrado: {0}" -f $pattern)
+        continue
+      }
+      $pkg | ForEach-Object {
+        Add-AppxPackage -DisableDevelopmentMode -Register "$($_.InstallLocation)\AppXManifest.xml" -ErrorAction Stop
+      }
+      Ok ("Pacote re-registrado: {0}" -f $pattern)
+    } catch {
+      $errors++
+      Err ("Falha ao re-registrar {0}: {1}" -f $pattern, $_.Exception.Message)
+    }
+  }
+
+  # 3) Iniciar ctfmon.exe (entrada de texto, afeta caixa de pesquisa/menu iniciar)
+  try{
+    $ctf = Join-Path $env:SystemRoot 'System32\ctfmon.exe'
+    if(Test-Path $ctf){
+      Info "Iniciando componente de entrada de texto (ctfmon.exe)..."
+      Start-Process $ctf
+      Ok "ctfmon.exe iniciado."
+    } else {
+      Warn "ctfmon.exe não encontrado em: $ctf"
+    }
+  } catch {
+    $errors++
+    Err ("Falha ao iniciar ctfmon.exe: {0}" -f $_.Exception.Message)
+  }
+
+  # 4) Opcional: sfc /scannow
+  if(AskYN "Deseja executar também 'sfc /scannow' para verificar arquivos de sistema?"){
+    try{
+      Info "Executando sfc /scannow (pode demorar alguns minutos)..."
+      sfc /scannow
+      Ok "sfc /scannow finalizado."
+    } catch {
+      $errors++
+      Err ("Falha ao executar sfc /scannow: {0}" -f $_.Exception.Message)
+    }
+  }
+
+  if($errors -gt 0){
+    Warn ("Procedimento concluído com {0} falha(s). Recomenda-se reiniciar o Windows." -f $errors)
+  } else {
+    Ok "Procedimento de correção da pesquisa concluído com sucesso. Recomenda-se reiniciar o Windows. ✅"
+  }
+}
+
 # ---------------- Menu principal ----------------
 do {
   try {
@@ -629,6 +720,7 @@ do {
       '4' { Run-Report }
       '5' { Run-CopyAll }
       '6' { Run-DeleteAll }
+      '7' { Run-FixSearch }
       '0' { Info "Saindo..."; Start-Sleep -Milliseconds 120; exit 0 }
       default { Warn "Opção inválida." }
     }
