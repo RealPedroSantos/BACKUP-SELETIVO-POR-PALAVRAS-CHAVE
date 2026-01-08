@@ -1,12 +1,14 @@
-# ============== SELETOR POR PALAVRAS-CHAVE (Cópia/Exclusão/Conferência + RustDesk) v3.9 ==============
+# ======================= TOOLKIT (v3.9) =======================
+# Menu principal reduzido:
+# [7] Corrigir Pesquisa/Menu Iniciar
+# [9] Win11 Repair - Menu completo
+# [0] Sair
+# Execute no PowerShell como Administrador.
 
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $ErrorActionPreference = 'Stop'
 
-# ---------------- Config extra ----------------
-$Global:PreferWinRarFallback = $false  # $true para priorizar WinRAR (-df) na exclusão
-
-# ---------------- Utilidades comuns ----------------
+# ---------------- Utilidades ----------------
 function Info([string]$m){ Write-Host "[i]  $m"  -ForegroundColor Cyan }
 function Ok  ([string]$m){ Write-Host "[OK] $m" -ForegroundColor Green }
 function Warn([string]$m){ Write-Host "[!]  $m"  -ForegroundColor Yellow }
@@ -18,657 +20,323 @@ function Test-IsAdmin {
   return $p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
-function Require-Path([string]$p,[string]$label){
-  if([string]::IsNullOrWhiteSpace($p)){ throw "Caminho de $label não informado." }
-  (Resolve-Path -LiteralPath $p -ErrorAction Stop).Path.TrimEnd('\')
-}
-function Ensure-Dir([string]$p){
-  if(-not (Test-Path -LiteralPath $p)){ New-Item -ItemType Directory -Path $p | Out-Null }
-  (Resolve-Path -LiteralPath $p).Path.TrimEnd('\')
-}
-function ParseKeys([string]$raw){
-  $k = $raw -split '[,\r\n;]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ }
-  if($k.Count -eq 0){ throw "Nenhuma palavra-chave válida informada." }
-  $k | Sort-Object -Unique
-}
-function Pattern([string[]]$keys){ '(' + (($keys | ForEach-Object {[Regex]::Escape($_)}) -join '|') + ')' }
-
-# Pastas: usar só os 4 primeiros caracteres do nome
-function First4([string]$s){
-  if([string]::IsNullOrEmpty($s)){ return "" }
-  $len = [Math]::Min(4, $s.Length)
-  $s.Substring(0, $len)
-}
-# Pastas: CHAVE nos 4 primeiros chars e NÃO pode continuar com letra/dígito.
-function PatternPrefixToken([string[]]$keys){
-  $union = ($keys | ForEach-Object {[Regex]::Escape($_)}) -join '|'
-  '^(?:' + $union + ')(?![0-9A-Za-z])'
+function AskYN([string]$q){
+  ($ans = Read-Host "$q (S/N)") -match '^[sS]'
 }
 
-function AskYN([string]$q){ ($ans = Read-Host "$q (S/N)") -match '^[sS]' }
-function AskFocus([string]$acao){
-  do{
-    $txt = if($acao -eq 'Apagar'){
-      "Foco: [P]astas (apaga pasta inteira) | [A]rquivos (só arquivos)"
-    } else { "Foco da busca: [P]astas (copia pasta inteira) | [A]rquivos (só arquivos)" }
-    $a = Read-Host $txt
-    switch -Regex ($a){
-      '^[pP]' { return 'Pastas' }
-      '^[aA]' { return 'Arquivos' }
-      default { Warn "Opção inválida. Use P ou A." }
-    }
-  } while ($true)
-}
-function AskScopeCheck{
-  do{
-    $a = Read-Host "Escopo: [P]astas | [A]rquivos | [B]oth (ambos)"
-    switch -Regex ($a){
-      '^[pP]' { return 'Pastas' }
-      '^[aA]' { return 'Arquivos' }
-      '^[bB]' { return 'Ambos' }
-      default { Warn "Opção inválida. Use P, A ou B." }
-    }
-  } while ($true)
+function Pause-Enter([string]$msg = "Pressione Enter para continuar..."){
+  Info $msg
+  [void][System.Console]::ReadLine()
 }
 
-# Mantém apenas as PASTAS mais profundas (deepest)
-function Keep-DeepestDirs([string[]]$dirPaths){
-  $kept = New-Object System.Collections.Generic.List[string]
-  foreach($cur in ($dirPaths | Sort-Object Length -Descending)){
-    $isAncestorOfKept = $false
-    foreach($k in $kept){ if($k.StartsWith($cur + '\')){ $isAncestorOfKept = $true; break } }
-    if(-not $isAncestorOfKept){ [void]$kept.Add($cur) }
-  }
-  ,$kept
-}
-
-# ==================== Suporte a PATH longo e travas (exclusão robusta) ====================
-function Use-LongPath([string]$p){
-  if($p.StartsWith("\\\\")){ return "\\?\UNC\" + $p.Substring(2) }
-  if($p -match '^[A-Za-z]:'){ return "\\?\$p" }
-  $p
-}
-function Clear-Attributes([string]$path){
-  try{
-    $p = Use-LongPath $path
-    if (Test-Path -LiteralPath $path -PathType Container) {
-      attrib -r -h -s "$p" 2>$null
-      attrib -r -h -s "$p\*" /S /D 2>$null
-    } else {
-      attrib -r -h -s "$p" 2>$null
-    }
-  } catch {}
-}
-function Ensure-OwnershipAndRights([string]$path){
-  try{ & takeown.exe /F "$path" /A /R /D Y 2>$null | Out-Null } catch {}
-  try{ & icacls.exe "$path" /grant "*S-1-5-32-544:(OI)(CI)F" /T /C 2>$null | Out-Null } catch {}
-}
-
-# WinRAR (fallback)
-function Get-RarExe {
-  $paths = @()
-  try{
-    $cmd = Get-Command -Name "Rar.exe" -ErrorAction SilentlyContinue
-    if($cmd -and $cmd.Source){ $paths += $cmd.Source }
-  } catch {}
-  $paths += @("$env:ProgramFiles\WinRAR\Rar.exe","$env:ProgramFiles(x86)\WinRAR\Rar.exe")
-  foreach($p in $paths){ if($p -and (Test-Path $p)){ return $p } }
-  $null
-}
-function Try-WinRar-Delete([string]$path){
-  $rar = Get-RarExe
-  if(-not $rar){ return $false }
-  try{
-    $tempBase = Join-Path $env:TEMP ("wr_{0}" -f ([guid]::NewGuid().ToString("N")))
-    $archive  = "$tempBase.rar"
-    $dir  = Split-Path -Path $path -Parent
-    $leaf = Split-Path -Leaf $path
-    if(-not (Test-Path -LiteralPath $dir)){ return $false }
-    Push-Location $dir
-    try{ & $rar a -r -ep1 -df -- "$archive" "--" "$leaf" | Out-Null } finally { Pop-Location }
-    if(Test-Path $archive){ Remove-Item -LiteralPath $archive -Force -ErrorAction SilentlyContinue }
-    $true
-  } catch { $false }
-}
-
-# Robocopy + rmdir para pastas
-function Remove-DirRobocopy([string]$dir){
-  $empty  = Join-Path $env:TEMP ("empty_{0}" -f ([guid]::NewGuid()))
-  New-Item -ItemType Directory -Path $empty -Force | Out-Null
-  try{
-    $robo = Join-Path $env:SystemRoot "System32\robocopy.exe"
-    $null = & $robo $empty "$dir" /MIR /R:1 /W:1 /NFL /NDL /NP /XJ 2>$null
-  } finally {
-    Remove-Item -LiteralPath $empty -Recurse -Force -ErrorAction SilentlyContinue
-  }
-  cmd.exe /c "rmdir /s /q `"$([string](Use-LongPath $dir))`"" | Out-Null
-  if (Test-Path -LiteralPath $dir) { throw "Falha ao remover diretório (após robocopy/rmdir)." }
-}
-
-# Agendar exclusão no boot
-if (-not ("WinAPI.Native" -as [type])) {
-  Add-Type -Namespace WinAPI -Name Native -MemberDefinition @'
-[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError=true, CharSet=System.Runtime.InteropServices.CharSet.Unicode)]
-public static extern bool MoveFileEx(string lpExistingFileName, string lpNewFileName, int dwFlags);
-'@
-}
-$MOVEFILE_DELAY_UNTIL_REBOOT = 0x4
-function Schedule-DeleteOnReboot([string]$path){
-  [void][WinAPI.Native]::MoveFileEx((Use-LongPath $path), $null, $MOVEFILE_DELAY_UNTIL_REBOOT)
-}
-
-function Remove-FileSmart([string]$file){
-  $ok = $false
-  try{
-    Clear-Attributes $file
-    Ensure-OwnershipAndRights $file
-    if($Global:PreferWinRarFallback){
-      if(Try-WinRar-Delete $file){ Ok "Arquivo (via WinRAR): $file"; return }
-    }
-    Remove-Item -LiteralPath (Use-LongPath $file) -Force -ErrorAction Stop
-    $ok = $true
-  } catch {
-    Warn ("Falha ao apagar arquivo '{0}': {1}" -f $file, $_.Exception.Message)
-    if(-not $Global:PreferWinRarFallback){
-      if(Try-WinRar-Delete $file){ Ok "Arquivo (via WinRAR): $file"; return }
-    }
-    try{
-      cmd.exe /c "del /f /q `"$([string](Use-LongPath $file))`"" | Out-Null
-      if(-not (Test-Path -LiteralPath $file)){ $ok = $true }
-    } catch {}
-    if(-not $ok){ Schedule-DeleteOnReboot $file; Warn "Agendado para exclusão no próximo boot: $file" }
-  }
-  if($ok){ Ok ("Arquivo apagado: {0}" -f $file) }
-}
-function Remove-DirSmart([string]$dir){
-  $ok = $false
-  try{
-    Clear-Attributes $dir
-    Ensure-OwnershipAndRights $dir
-    if($Global:PreferWinRarFallback){
-      if(Try-WinRar-Delete $dir){ Ok "Pasta (via WinRAR): $dir"; return }
-    }
-    Remove-DirRobocopy $dir
-    $ok = $true
-  } catch {
-    Warn ("Falha ao apagar pasta '{0}': {1}" -f $dir, $_.Exception.Message)
-    if(-not $Global:PreferWinRarFallback){
-      if(Try-WinRar-Delete $dir){ Ok "Pasta (via WinRAR): $dir"; return }
-    }
-    try{
-      cmd.exe /c "rmdir /s /q `"$([string](Use-LongPath $dir))`"" | Out-Null
-      if(-not (Test-Path -LiteralPath $dir)){ $ok = $true }
-    } catch {}
-    if(-not $ok){ Schedule-DeleteOnReboot $dir; Warn "Agendada para exclusão no próximo boot: $dir" }
-  }
-  if($ok){ Ok ("Pasta apagada: {0}" -f $dir) }
-}
-
-# ==================== OPÇÃO [4] — RUSTDESK (Defender Exceção) ====================
-function ShowHeaderRustDesk{
-  Clear-Host
-  Write-Host "========== LIBERAR RUSTDESK NO DEFENDER ==========" -ForegroundColor Cyan
-  Write-Host "Exceções SOMENTE pro RustDesk (não desativa o Defender)." -ForegroundColor Yellow
-  Write-Host "==================================================" -ForegroundColor Cyan
-}
-function Run-RustDeskAllowDefender {
-  ShowHeaderRustDesk
-
-  if (-not (Test-IsAdmin)) { Err "Rode como Administrador."; return }
-  if (-not (Get-Command Add-MpPreference -ErrorAction SilentlyContinue)) {
-    Err "Cmdlets do Defender não encontrados (Add-MpPreference)."
-    return
-  }
-  if (-not (AskYN "Dar inicio a liberação do RustDesk no Defender?")) { Warn "Cancelado."; return }
-
-  # Ajusta os caminhos conforme teu caso
-  $installer = "C:\Temp\rustdesk-1.4.4-x86_64.exe"
-  $exe       = "C:\Program Files\RustDesk\rustdesk.exe"
-  $cacheDir  = "C:\Temp\AppsCache"
-
-  try {
-    if (Test-Path $installer) { Unblock-File $installer -ErrorAction SilentlyContinue }
-    if (Test-Path $exe)       { Unblock-File $exe       -ErrorAction SilentlyContinue }
-
-    Add-MpPreference -ExclusionPath    $cacheDir -ErrorAction SilentlyContinue
-    Add-MpPreference -ExclusionProcess $exe      -ErrorAction SilentlyContinue
-    Add-MpPreference -ExclusionPath    "C:\Program Files\RustDesk" -ErrorAction SilentlyContinue
-
-    try { Add-MpPreference -ControlledFolderAccessAllowedApplications $exe -ErrorAction SilentlyContinue } catch {}
-
-    Ok "Exceções aplicadas. ✅"
-  } catch {
-    Err ("Falhou: {0}" -f $_.Exception.Message)
-  }
-}
-
-# ==================== OPÇÃO [8] — RUSTDESK via SRP (Software Restriction Policies) ====================
-function ShowHeaderRustDeskSrp{
-  Clear-Host
-  Write-Host "========== LIBERAR RUSTDESK VIA SRP (SAFER) ==========" -ForegroundColor Cyan
-  Write-Host "Cria regra SRP só pra pasta/exe do RustDesk." -ForegroundColor Yellow
-  Write-Host "======================================================" -ForegroundColor Cyan
-}
-
-function Run-RustDeskAllowSRP {
-  ShowHeaderRustDeskSrp
-
-  if (-not (Test-IsAdmin)) { Err "Rode como Administrador."; return }
-  if (-not (AskYN "Criar regra SRP pra liberar o RustDesk agora?")) { Warn "Cancelado."; return }
-
-  $rulesRoot = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Safer\CodeIdentifiers"
-  $pathsRoot = Join-Path $rulesRoot "0\Paths"
-
-  function Set-IfMissingDword([string]$path,[string]$name,[uint32]$value){
-    $cur = Get-ItemProperty -Path $path -Name $name -ErrorAction SilentlyContinue
-    if($null -eq $cur){
-      New-ItemProperty -Path $path -Name $name -PropertyType DWord -Value $value -Force | Out-Null
-    }
-  }
-
-  function Add-SrpPathRule {
-    param(
-      [Parameter(Mandatory)] [string] $PathPattern,
-      [string] $Description = "Allow by SRP",
-      [int] $SaferFlags = 0
-    )
-    $guid = ([guid]::NewGuid().ToString("B").ToUpper())
-    $key  = Join-Path $pathsRoot $guid
-
-    New-Item -Path $key -Force | Out-Null
-    New-ItemProperty -Path $key -Name "ItemData"    -PropertyType String -Value $PathPattern  -Force | Out-Null
-    New-ItemProperty -Path $key -Name "Description" -PropertyType String -Value $Description  -Force | Out-Null
-    New-ItemProperty -Path $key -Name "Level"       -PropertyType DWord  -Value 0x00040000    -Force | Out-Null  # Unrestricted
-    New-ItemProperty -Path $key -Name "SaferFlags"  -PropertyType DWord  -Value $SaferFlags   -Force | Out-Null
-  }
-
-  try {
-    New-Item -Path $rulesRoot -Force | Out-Null
-    New-Item -Path $pathsRoot -Force | Out-Null
-
-    # Só cria se não existir (não pisa em SRP já configurada)
-    Set-IfMissingDword $rulesRoot "DefaultLevel"        0x00040000  # Unrestricted default
-    Set-IfMissingDword $rulesRoot "PolicyScope"         0          # 0 = todos usuários
-    Set-IfMissingDword $rulesRoot "TransparentEnabled"  1
-    Set-IfMissingDword $rulesRoot "AuthenticodeEnabled" 0
-
-    # Regras (pasta + exe)
-    Add-SrpPathRule -PathPattern "C:\Program Files\RustDesk\*"            -Description "Allow RustDesk folder"
-    Add-SrpPathRule -PathPattern "C:\Program Files\RustDesk\rustdesk.exe" -Description "Allow rustdesk.exe"
-
-    # (Opcional) remove “marca da internet”
-    $exe = "C:\Program Files\RustDesk\rustdesk.exe"
-    if(Test-Path $exe){ Unblock-File -LiteralPath $exe -ErrorAction SilentlyContinue }
-
-    # Atualiza políticas
-    Start-Process -FilePath "gpupdate.exe" -ArgumentList "/force" -Wait -WindowStyle Hidden | Out-Null
-
-    Ok "SRP criada pra liberar o RustDesk. Se não liberar na hora, reinicia o PC. ✅"
-  } catch {
-    Err ("Falhou SRP: {0}" -f $_.Exception.Message)
-  }
-}
-
-# ---------------- Cabeçalhos ----------------
-function ShowHeaderMain{
-  Clear-Host
-  Write-Host "================ SELETOR POR PALAVRAS-CHAVE (v3.9) ================" -ForegroundColor Cyan
-  Write-Host "[1] Copiar (backup seletivo)" -ForegroundColor Green
-  Write-Host "[2] Excluir (apagamento seletivo - permanente)" -ForegroundColor Yellow
-  Write-Host "[3] Conferir (verificar chaves presentes/ausentes)" -ForegroundColor Magenta
-  Write-Host "[4] Liberar RustDesk no Defender (exceção)" -ForegroundColor White
-  Write-Host "[5] Copiar TUDO (sem palavra-chave)" -ForegroundColor Green
-  Write-Host "[6] Apagar TUDO (sem palavra-chave)" -ForegroundColor Red
-  Write-Host "[7] Corrigir pesquisa do Windows (Search/Menu Iniciar)" -ForegroundColor Cyan
-  Write-Host "[8] Liberar RustDesk via SRP (Safer)" -ForegroundColor White
-  Write-Host "[0] Sair"
-  Write-Host "===================================================================="
-}
-function ShowHeaderCopy{ Clear-Host; Write-Host "============== BACKUP SELETIVO POR PALAVRAS-CHAVE ==============" -ForegroundColor Cyan }
-function ShowHeaderDelete{
-  Clear-Host
-  Write-Host "========== EXCLUSÃO SELETIVA POR PALAVRAS-CHAVE =========" -ForegroundColor Cyan
-  Write-Host "AÇÃO DESTRUTIVA! Sem lixeira. Confirme com atenção." -ForegroundColor Yellow
-}
-function ShowHeaderCheck{ Clear-Host; Write-Host "================ CONFERÊNCIA POR PALAVRAS-CHAVE ================" -ForegroundColor Cyan }
-function ShowHeaderCopyAll{ Clear-Host; Write-Host "============== CÓPIA COMPLETA (SEM PALAVRA-CHAVE) =============" -ForegroundColor Cyan }
-function ShowHeaderDeleteAll{ Clear-Host; Write-Host "================ APAGAR TUDO (SEM PALAVRA-CHAVE) ================" -ForegroundColor Red }
+# ==================== OPÇÃO [7] — CORRIGIR PESQUISA / MENU INICIAR ====================
 function ShowHeaderFixSearch{
   Clear-Host
-  Write-Host "========== CORREÇÃO DA PESQUISA / MENU INICIAR (Windows Search) =========" -ForegroundColor Cyan
+  Write-Host "========== CORRECAO DA PESQUISA / MENU INICIAR (Windows Search) ==========" -ForegroundColor Cyan
 }
 
-# ---------------- Programa 1: COPIAR (SELETIVO) ----------------
-function Run-Backup {
-  ShowHeaderCopy
-  $src = Read-Host "Informe a ORIGEM (ex.: C:\A)"
-  $dst = Read-Host "Informe o DESTINO (ex.: C:\B)"
-  $kw  = Read-Host "Informe as PALAVRAS-CHAVE (ex.: 1111,2222,3333)"
-  $recurse = AskYN "Varrer subpastas?"
-  $focus   = AskFocus 'Copiar'
-
-  try{
-    $Source = Require-Path $src "Origem"
-    $Dest   = Ensure-Dir   $dst
-    $Keys   = ParseKeys $kw
-    $RegexAny   = Pattern $Keys
-    $RegexPfxTk = PatternPrefixToken $Keys
-  } catch { Err $_.Exception.Message; return }
-
-  $errors = 0
-
-  if($focus -eq 'Pastas'){
-    $dirEnum = if($recurse){
-      Get-ChildItem -LiteralPath $Source -Directory -Recurse -Force -ErrorAction SilentlyContinue
-    } else {
-      Get-ChildItem -LiteralPath $Source -Directory -Force -ErrorAction SilentlyContinue
-    }
-
-    $matched = @($dirEnum | Where-Object { (First4 $_.Name) -match $RegexPfxTk } | Select-Object -ExpandProperty FullName)
-    $deepest = Keep-DeepestDirs $matched
-
-    Info ("Pastas casadas (deepest): {0}" -f $deepest.Count)
-    if($deepest.Count -eq 0){ Warn "Nada para copiar."; return }
-    if(-not (AskYN "Prosseguir com a CÓPIA agora?")){ Warn "Cancelado."; return }
-
-    $RobocopyExe = Join-Path $env:SystemRoot "System32\robocopy.exe"
-    $roboArgs = @('/E','/COPY:DAT','/DCOPY:T','/Z','/R:1','/W:1','/MT:16','/XJ','/NFL','/NDL','/NP')
-
-    foreach($d in $deepest){
-      try{
-        $rel    = $d.Substring($Source.Length).TrimStart('\')
-        $dstDir = Join-Path $Dest $rel
-        if(-not (Test-Path -LiteralPath $dstDir)){ New-Item -ItemType Directory -Path $dstDir -Force | Out-Null }
-        Info ("Copiando PASTA: {0}" -f $d)
-        $null = & $RobocopyExe $d $dstDir @roboArgs
-        if($LASTEXITCODE -ge 8){
-          Warn ("Robocopy falhou (ExitCode={0}) em {1}; usando Copy-Item" -f $LASTEXITCODE, $d)
-          Copy-Item -LiteralPath $d -Destination $dstDir -Recurse -Force -ErrorAction Stop
-        } else { Ok ("OK: {0}" -f $d) }
-      } catch { $errors++; Err ("Falha '{0}': {1}" -f $d, $_.Exception.Message) }
-    }
-
-  } else {
-    $fileEnum = if($recurse){
-      Get-ChildItem -LiteralPath $Source -File -Recurse -Force -ErrorAction SilentlyContinue
-    } else {
-      Get-ChildItem -LiteralPath $Source -File -Force -ErrorAction SilentlyContinue
-    }
-
-    $files = @($fileEnum | Where-Object { $_.Name -match $RegexAny })
-    Info ("Arquivos que casam: {0}" -f $files.Count)
-    if($files.Count -eq 0){ Warn "Nada para copiar."; return }
-    if(-not (AskYN "Prosseguir com a CÓPIA agora?")){ Warn "Cancelado."; return }
-
-    foreach($f in $files){
-      try{
-        $rel    = $f.FullName.Substring($Source.Length).TrimStart('\')
-        $subRel = Split-Path -Path $rel -Parent
-        $dstDir = if([string]::IsNullOrEmpty($subRel)){ $Dest } else { Join-Path $Dest $subRel }
-        if(-not (Test-Path -LiteralPath $dstDir)){ New-Item -ItemType Directory -Path $dstDir -Force | Out-Null }
-        Copy-Item -LiteralPath $f.FullName -Destination $dstDir -Force -ErrorAction Stop
-        Ok ("Arquivo copiado: {0}" -f $f.FullName)
-      } catch { $errors++; Err ("Falha '{0}': {1}" -f $f.FullName, $_.Exception.Message) }
-    }
-  }
-
-  if($errors -gt 0){ Warn ("Finalizado com {0} falha(s)." -f $errors) } else { Ok "Concluído. 🎉" }
-}
-
-# ---------------- Programa 2: EXCLUIR (ROBUSTO / SELETIVO) ----------------
-function Confirm-Deletion([int]$qtdPastas,[int]$qtdArquivos){
-  Write-Host ""
-  Write-Host ("Resumo: Pastas: {0} | Arquivos: {1}" -f $qtdPastas,$qtdArquivos) -ForegroundColor Yellow
-  AskYN "Prosseguir com a EXCLUSÃO agora?"
-}
-function Run-Delete {
-  ShowHeaderDelete
-  $src = Read-Host "Informe a ORIGEM (ex.: C:\A)"
-  $kw  = Read-Host "Informe as PALAVRAS-CHAVE (ex.: 1111,2222,3333)"
-  $recurse = AskYN "Varrer subpastas?"
-  $focus   = AskFocus 'Apagar'
-
-  try{
-    $Source = Require-Path $src "Origem"
-    $Keys   = ParseKeys $kw
-    $RegexAny   = Pattern $Keys
-    $RegexPfxTk = PatternPrefixToken $Keys
-  } catch { Err $_.Exception.Message; return }
-
-  $errors = 0
-
-  if($focus -eq 'Pastas'){
-    $dirEnum = if($recurse){
-      Get-ChildItem -LiteralPath $Source -Directory -Recurse -Force -ErrorAction SilentlyContinue
-    } else {
-      Get-ChildItem -LiteralPath $Source -Directory -Force -ErrorAction SilentlyContinue
-    }
-
-    $matched = @($dirEnum | Where-Object { (First4 $_.Name) -match $RegexPfxTk } | Select-Object -ExpandProperty FullName)
-    $deepest = Keep-DeepestDirs $matched
-
-    Info ("Pastas casadas (deepest): {0}" -f $deepest.Count)
-    if($deepest.Count -eq 0){ Warn "Nada para apagar."; return }
-    if(-not (Confirm-Deletion -qtdPastas $deepest.Count -qtdArquivos 0)){ Warn "Cancelado."; return }
-
-    foreach($d in $deepest){
-      try{ Write-Host ("Apagando PASTA: {0}" -f $d); Remove-DirSmart $d }
-      catch { $errors++; Err ("Falha '{0}': {1}" -f $d, $_.Exception.Message) }
-    }
-
-  } else {
-    $fileEnum = if($recurse){
-      Get-ChildItem -LiteralPath $Source -File -Recurse -Force -ErrorAction SilentlyContinue
-    } else {
-      Get-ChildItem -LiteralPath $Source -File -Force -ErrorAction SilentlyContinue
-    }
-
-    $files = @($fileEnum | Where-Object { $_.Name -match $RegexAny })
-    Info ("Arquivos que casam: {0}" -f $files.Count)
-    if($files.Count -eq 0){ Warn "Nada para apagar."; return }
-    if(-not (Confirm-Deletion -qtdPastas 0 -qtdArquivos $files.Count)){ Warn "Cancelado."; return }
-
-    foreach($f in $files){
-      try{ Write-Host ("Apagando ARQUIVO: {0}" -f $f.FullName); Remove-FileSmart $f.FullName }
-      catch { $errors++; Err ("Falha '{0}': {1}" -f $f.FullName, $_.Exception.Message) }
-    }
-  }
-
-  if($errors -gt 0){ Warn ("Finalizado com {0} falha(s)." -f $errors) } else { Ok "Concluído. 🎉" }
-}
-
-# ---------------- Programa 3: CONFERIR ----------------
-function Run-Check {
-  ShowHeaderCheck
-  $path = Read-Host "Informe o CAMINHO a conferir (ex.: C:\Destino)"
-  $kw   = Read-Host "Informe as PALAVRAS-CHAVE (ex.: 1111,2222,3333)"
-  $recurse = AskYN "Varrer subpastas?"
-  $scope   = AskScopeCheck
-
-  try{
-    $Base   = Require-Path $path "Caminho"
-    $Keys   = ParseKeys $kw
-    $RegexAny = Pattern $Keys
-  } catch { Err $_.Exception.Message; return }
-
-  $dirs  = @(); $files = @()
-  if($scope -in @('Pastas','Ambos')){
-    $dirs = if($recurse){
-      Get-ChildItem -LiteralPath $Base -Directory -Recurse -Force -ErrorAction SilentlyContinue
-    } else {
-      Get-ChildItem -LiteralPath $Base -Directory -Force -ErrorAction SilentlyContinue
-    }
-  }
-  if($scope -in @('Arquivos','Ambos')){
-    $files = if($recurse){
-      Get-ChildItem -LiteralPath $Base -File -Recurse -Force -ErrorAction SilentlyContinue
-    } else {
-      Get-ChildItem -LiteralPath $Base -File -Force -ErrorAction SilentlyContinue
-    }
-  }
-  if(-not $dirs -and -not $files){ Warn "Nada encontrado no escopo."; return }
-
-  $foundKeys   = New-Object System.Collections.Generic.List[string]
-  $missingKeys = New-Object System.Collections.Generic.List[string]
-  $samplesByKey = @{}
-
-  foreach($k in $Keys){
-    $rx = [Regex]::Escape($k)
-    $rxPrefix = '^' + $rx + '(?![0-9A-Za-z])'
-    $dirHits  = if($dirs){  $dirs  | Where-Object { (First4 $_.Name) -match $rxPrefix } | Select-Object -ExpandProperty Name } else { @() }
-    $fileHits = if($files){ $files | Where-Object { $_.Name -match $rx }        | Select-Object -ExpandProperty Name } else { @() }
-    $hits = @($dirHits + $fileHits)
-
-    if($hits.Count -gt 0){
-      [void]$foundKeys.Add($k)
-      $samplesByKey[$k] = ($hits | Select-Object -Unique -First 10)
-    } else {
-      [void]$missingKeys.Add($k)
-    }
-  }
-
-  Write-Host ""
-  Write-Host "==================== RESULTADO ====================" -ForegroundColor Magenta
-  Write-Host ("ENCONTRADAS: {0}" -f $foundKeys.Count) -ForegroundColor Green
-  if($foundKeys.Count){ Write-Host (" - " + ($foundKeys -join ", ")) -ForegroundColor DarkGreen }
-  Write-Host ("NÃO ENCONTRADAS: {0}" -f $missingKeys.Count) -ForegroundColor Yellow
-  if($missingKeys.Count){ Write-Host (" - " + ($missingKeys -join ", ")) -ForegroundColor DarkYellow }
-
-  if(($foundKeys.Count -gt 0) -and (AskYN "Ver AMOSTRAS por chave?")){
-    foreach($k in $foundKeys){
-      Write-Host ("--- {0}:" -f $k) -ForegroundColor Cyan
-      foreach($s in $samplesByKey[$k]){ Write-Host ("   • {0}" -f $s) }
-    }
-  }
-  Ok "Conferência concluída. ✅"
-}
-
-# ---------------- Programa 5: CÓPIA COMPLETA ----------------
-function Run-CopyAll {
-  ShowHeaderCopyAll
-  $src = Read-Host "Informe a ORIGEM (ex.: C:\A)"
-  $dst = Read-Host "Informe o DESTINO (ex.: C:\B)"
-
-  try{
-    $Source = Require-Path $src "Origem"
-    $Dest   = Ensure-Dir   $dst
-  } catch { Err $_.Exception.Message; return }
-
-  if(-not (AskYN "Confirmar CÓPIA COMPLETA de TODO o conteúdo?")){ Warn "Cancelado."; return }
-
-  $RobocopyExe = Join-Path $env:SystemRoot "System32\robocopy.exe"
-  $roboArgs = @('/E','/COPY:DAT','/DCOPY:T','/Z','/R:1','/W:1','/MT:16','/XJ','/NFL','/NDL','/NP')
-
-  Info "Copiando com Robocopy..."
-  $null = & $RobocopyExe $Source $Dest @roboArgs
-  $code = $LASTEXITCODE
-
-  if($code -ge 8){
-    Warn ("Robocopy ExitCode={0}. Tentando Copy-Item..." -f $code)
-    try{
-      Copy-Item -Path (Join-Path $Source '*') -Destination $Dest -Recurse -Force -ErrorAction Stop
-      Ok "Cópia concluída via Copy-Item."
-    } catch { Err ("Falha: {0}" -f $_.Exception.Message) }
-  } else {
-    Ok ("Cópia concluída (ExitCode={0})." -f $code)
-  }
-}
-
-# ---------------- Programa 6: APAGAR TUDO ----------------
-function Run-DeleteAll {
-  ShowHeaderDeleteAll
-  $path = Read-Host "Informe o CAMINHO onde será apagado TUDO (ex.: C:\Temp\Lixeira)"
-
-  try{
-    $Base = Require-Path $path "Caminho"
-    if($Base -match '^[A-Za-z]:\\$'){ Err "Por segurança, não apaga a raiz ($Base)."; return }
-  } catch { Err $_.Exception.Message; return }
-
-  if(-not (AskYN "Confirmar APAGAR TUDO dentro desse caminho?")){ Warn "Cancelado."; return }
-
-  $errors = 0
-
-  $files = Get-ChildItem -LiteralPath $Base -File -Recurse -Force -ErrorAction SilentlyContinue
-  Info ("Arquivos: {0}" -f $files.Count)
-  foreach($f in $files){
-    try{ Remove-FileSmart $f.FullName } catch { $errors++; Err $_.Exception.Message }
-  }
-
-  $dirs = Get-ChildItem -LiteralPath $Base -Directory -Recurse -Force -ErrorAction SilentlyContinue | Sort-Object FullName -Descending
-  Info ("Pastas internas: {0}" -f $dirs.Count)
-  foreach($d in $dirs){
-    try{ Remove-DirSmart $d.FullName } catch { $errors++; Err $_.Exception.Message }
-  }
-
-  if(AskYN ("Apagar também a PASTA RAIZ '{0}'?" -f $Base)){
-    try{ Remove-DirSmart $Base } catch { $errors++; Err $_.Exception.Message }
-  }
-
-  if($errors -gt 0){ Warn ("Finalizado com {0} falha(s)." -f $errors) } else { Ok "Apagado com sucesso. ✅" }
-}
-
-# ---------------- Programa 7: CORRIGIR PESQUISA ----------------
 function Run-FixSearch {
   ShowHeaderFixSearch
-  if(-not (AskYN "Tentar corrigir a busca do Windows neste PC?")){ Warn "Cancelado."; return }
+
+  if(-not (Test-IsAdmin)){
+    Err "Rode como Administrador."
+    Pause-Enter
+    return
+  }
+
+  if(-not (AskYN "Tentar corrigir a busca do Windows neste PC?")){
+    Warn "Cancelado."
+    Pause-Enter
+    return
+  }
 
   $errors = 0
+
   try{
-    Info "Ajustando WSearch..."
+    Info "Ajustando servico WSearch..."
     Set-Service -Name WSearch -StartupType Automatic -ErrorAction Stop
     Restart-Service WSearch -ErrorAction Stop
     Ok "WSearch OK."
-  } catch { $errors++; Err ("WSearch falhou: {0}" -f $_.Exception.Message) }
+  } catch {
+    $errors++
+    Err ("WSearch falhou: {0}" -f $_.Exception.Message)
+  }
 
   $packages = @('*StartMenuExperienceHost*','*ShellExperienceHost*','*Windows.Search*')
   foreach($pattern in $packages){
     try{
       Info ("Re-registrando: {0}" -f $pattern)
       $pkg = Get-AppxPackage -AllUsers $pattern -ErrorAction SilentlyContinue
-      if(-not $pkg){ Warn "Não encontrado: $pattern"; continue }
+      if(-not $pkg){ Warn "Nao encontrado: $pattern"; continue }
       $pkg | ForEach-Object {
-        Add-AppxPackage -DisableDevelopmentMode -Register "$($_.InstallLocation)\AppXManifest.xml" -ErrorAction Stop
+        $manifest = Join-Path $_.InstallLocation 'AppXManifest.xml'
+        Add-AppxPackage -DisableDevelopmentMode -Register $manifest -ErrorAction Stop
       }
       Ok ("OK: {0}" -f $pattern)
-    } catch { $errors++; Err ("Falha {0}: {1}" -f $pattern, $_.Exception.Message) }
+    } catch {
+      $errors++
+      Err ("Falha {0}: {1}" -f $pattern, $_.Exception.Message)
+    }
   }
 
   try{
-    $ctf = Join-Path $env:SystemRoot 'System32\ctfmon.exe'
-    if(Test-Path $ctf){ Start-Process $ctf; Ok "ctfmon OK." } else { Warn "ctfmon não encontrado." }
-  } catch { $errors++; Err ("ctfmon falhou: {0}" -f $_.Exception.Message) }
-
-  if(AskYN "Executar também 'sfc /scannow'?"){
-    try{ Info "Rodando sfc..."; sfc /scannow; Ok "sfc OK." } catch { $errors++; Err ("sfc falhou: {0}" -f $_.Exception.Message) }
+    $ctf = Join-Path (Join-Path $env:SystemRoot 'System32') 'ctfmon.exe'
+    if(Test-Path $ctf){ Start-Process $ctf; Ok "ctfmon OK." } else { Warn "ctfmon nao encontrado." }
+  } catch {
+    $errors++
+    Err ("ctfmon falhou: {0}" -f $_.Exception.Message)
   }
 
-  if($errors -gt 0){ Warn ("Concluído com {0} falha(s). Reinicia o PC." -f $errors) } else { Ok "Concluído. Reinicia o PC. ✅" }
+  if(AskYN "Executar tambem sfc scannow? (pode demorar)"){
+    try{
+      Info "Rodando SFC..."
+      sfc /scannow
+      Ok "SFC OK."
+    } catch {
+      $errors++
+      Err ("SFC falhou: {0}" -f $_.Exception.Message)
+    }
+  }
+
+  if($errors -gt 0){
+    Warn ("Concluido com {0} falha(s). Recomendo reiniciar o PC." -f $errors)
+  } else {
+    Ok "Concluido. Recomendo reiniciar o PC."
+  }
+
+  Pause-Enter
 }
 
-# ---------------- Menu principal ----------------
+# ==================== OPÇÃO [9] — WIN11 REPAIR (MENU INTERNO) ====================
+function Run-Win11Repair {
+  Clear-Host
+  Write-Host "===================== WIN11 REPARA TUDO =====================" -ForegroundColor Cyan
+  Write-Host "Cria ponto de restauracao, gera log na Area de Trabalho e oferece menu de reparos." -ForegroundColor Yellow
+  Write-Host "=============================================================" -ForegroundColor Cyan
+
+  if(-not (Test-IsAdmin)){
+    Err "Rode como Administrador."
+    Pause-Enter
+    return
+  }
+
+  try { Set-ExecutionPolicy -Scope Process Bypass -Force } catch {}
+
+  $logPath = Join-Path ([Environment]::GetFolderPath('Desktop')) ("Win11_Repair_Log_{0:yyyyMMdd_HHmmss}.txt" -f (Get-Date))
+  $transcriptStarted = $false
+  try { Start-Transcript -Path $logPath -Append | Out-Null; $transcriptStarted = $true } catch { Warn "Nao consegui iniciar o log (Start-Transcript). Continuando sem log." }
+
+  function New-RestorePointSafe {
+    try {
+      Info "Criando ponto de restauracao do sistema..."
+      Checkpoint-Computer -Description "Win11_Repair_$(Get-Date -Format yyyyMMdd_HHmmss)" -RestorePointType "MODIFY_SETTINGS"
+      Ok "Ponto de restauracao criado."
+    } catch {
+      Warn "Nao foi possivel criar ponto de restauracao (talvez desativado). Continuando..."
+    }
+  }
+
+  function Fix-SFC {
+    Info "Executando verificacao de integridade (SFC)..."
+    sfc /scannow
+    Ok "SFC finalizado."
+  }
+
+  function Fix-DISM {
+    Info "Reparando imagem do Windows (DISM RestoreHealth)... pode demorar."
+    DISM /Online /Cleanup-Image /RestoreHealth
+    Ok "DISM finalizado."
+  }
+
+  function Reset-WindowsUpdate {
+    Info "Resetando componentes do Windows Update..."
+    $services = "wuauserv","bits","cryptsvc","msiserver"
+    foreach($svc in $services){ sc.exe stop $svc | Out-Null 2>&1 }
+    Start-Sleep -Seconds 2
+
+    $sd = Join-Path $env:SystemRoot 'SoftwareDistribution'
+    $cr = Join-Path (Join-Path $env:SystemRoot 'System32') 'catroot2'
+
+    if(Test-Path $sd){ Rename-Item $sd ($sd + ".bak_" + (Get-Date -Format yyyyMMddHHmmss)) -ErrorAction SilentlyContinue }
+    if(Test-Path $cr){ Rename-Item $cr ($cr + ".bak_" + (Get-Date -Format yyyyMMddHHmmss)) -ErrorAction SilentlyContinue }
+
+    $dlls = @("atl.dll","urlmon.dll","mshtml.dll","jscript.dll","wuaueng.dll","wuapi.dll","wucltux.dll","wups.dll","wups2.dll","wuwebv.dll","qmgr.dll","qmgrprxy.dll")
+    foreach($d in $dlls){
+      try {
+        $dllPath = Join-Path (Join-Path $env:SystemRoot 'System32') $d
+        regsvr32.exe /s $dllPath
+      } catch {}
+    }
+
+    foreach($svc in $services){ sc.exe start $svc | Out-Null 2>&1 }
+    Ok "Windows Update resetado."
+  }
+
+  function Fix-StoreUWP {
+    Info "Limpando cache da Microsoft Store (wsreset)..."
+    try { Start-Process -FilePath "wsreset.exe" -Wait } catch {}
+    Ok "WSReset concluido."
+
+    Info "Re-registrando apps UWP (usuario atual)..."
+    Get-AppxPackage | ForEach-Object {
+      try {
+        $manifest = Join-Path $_.InstallLocation 'AppxManifest.xml'
+        Add-AppxPackage -DisableDevelopmentMode -Register $manifest -ErrorAction Stop
+      } catch {}
+    }
+    Ok "Re-registro UWP concluido."
+  }
+
+  function Fix-Network {
+    Info "Reset de rede (Winsock IP) e DNS..."
+    ipconfig /flushdns | Out-Null
+    netsh winsock reset | Out-Null
+    netsh int ip reset | Out-Null
+    Ok "Rede resetada. Reinicie o PC se necessario."
+  }
+
+  function Rebuild-IconThumbCache {
+    Info "Reconstruindo cache de icones e miniaturas..."
+    Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
+
+    $explorerDir = Join-Path (Join-Path (Join-Path (Join-Path $env:LOCALAPPDATA 'Microsoft') 'Windows') 'Explorer') ''
+    $thumbPattern = Join-Path $explorerDir 'thumbcache_*'
+    $iconDb = Join-Path $env:LOCALAPPDATA 'IconCache.db'
+    $iconPattern = Join-Path $explorerDir 'iconcache*'
+
+    foreach($p in @($thumbPattern,$iconDb,$iconPattern)){
+      Get-ChildItem $p -Force -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+    }
+
+    Start-Process explorer.exe
+    Ok "Caches reconstruidos."
+  }
+
+  function Clean-Temp {
+    Info "Limpando arquivos temporarios (usuario e sistema)..."
+    $paths = @($env:TEMP,(Join-Path $env:WINDIR 'Temp'))
+    foreach($p in $paths){
+      if(Test-Path $p){
+        Get-ChildItem -Path $p -Recurse -Force -ErrorAction SilentlyContinue |
+          Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+      }
+    }
+    Ok "Temporarios limpos."
+  }
+
+  function Check-Drive {
+    Info "Checando disco do sistema (chkdsk scan)..."
+    chkdsk C: /scan
+    Ok "Verificacao online concluida."
+    Warn "Para correcao completa: chkdsk C: /f (vai agendar e pedir reboot)."
+  }
+
+  function Fix-CommonServices {
+    Info "Garantindo servicos essenciais em Automatico (quando existirem)..."
+    $toAuto = @("wuauserv","bits","cryptsvc","dhcp","dnscache","eventlog","trkwks")
+    foreach($svc in $toAuto){
+      try { Set-Service -Name $svc -StartupType Automatic -ErrorAction Stop } catch {}
+    }
+    Ok "Servicos ajustados (quando existentes)."
+  }
+
+  function Reboot-IfWanted {
+    $ans = Read-Host "Deseja reiniciar agora? (S/N)"
+    if($ans -match '^[sS]'){
+      Info "Reiniciando..."
+      if($transcriptStarted){ try { Stop-Transcript | Out-Null } catch {} }
+      Restart-Computer
+    }
+  }
+
+  function Run-All {
+    New-RestorePointSafe
+    Fix-SFC
+    Fix-DISM
+    Reset-WindowsUpdate
+    Fix-StoreUWP
+    Fix-Network
+    Rebuild-IconThumbCache
+    Clean-Temp
+    Check-Drive
+    Fix-CommonServices
+    Ok "Pacotao concluido!"
+    Info ("Log salvo em: {0}" -f $logPath)
+    Reboot-IfWanted
+  }
+
+  function Show-MenuRepair {
+    Clear-Host
+    Write-Host "===================== WIN11 REPAIR - MENU =====================" -ForegroundColor Cyan
+    Write-Host "[1] Executar TUDO (recomendado)" -ForegroundColor Green
+    Write-Host "[2] SFC (verificar arquivos do sistema)"
+    Write-Host "[3] DISM (reparar imagem do Windows)"
+    Write-Host "[4] Reset Windows Update"
+    Write-Host "[5] Repair Microsoft Store UWP"
+    Write-Host "[6] Reset de Rede (Winsock IP) e Flush DNS"
+    Write-Host "[7] Reconstruir cache de icones miniaturas"
+    Write-Host "[8] Limpar arquivos temporarios"
+    Write-Host "[9] Checar disco (CHDSK scan)"
+    Write-Host "[10] Ajustar servicos comuns"
+    Write-Host "[0] Voltar"
+    Write-Host "==============================================================="
+  }
+
+  do {
+    Show-MenuRepair
+    $opt = Read-Host "Escolha uma opcao"
+    try {
+      switch($opt){
+        '1'  { Run-All }
+        '2'  { New-RestorePointSafe; Fix-SFC; Reboot-IfWanted }
+        '3'  { New-RestorePointSafe; Fix-DISM; Reboot-IfWanted }
+        '4'  { New-RestorePointSafe; Reset-WindowsUpdate; Reboot-IfWanted }
+        '5'  { New-RestorePointSafe; Fix-StoreUWP; Reboot-IfWanted }
+        '6'  { New-RestorePointSafe; Fix-Network; Reboot-IfWanted }
+        '7'  { New-RestorePointSafe; Rebuild-IconThumbCache }
+        '8'  { Clean-Temp }
+        '9'  { Check-Drive }
+        '10' { Fix-CommonServices }
+        '0'  { break }
+        default { Warn "Opcao invalida." }
+      }
+    } catch {
+      Err ("Erro: {0}" -f $_.Exception.Message)
+    }
+
+    if($opt -ne '0'){
+      Pause-Enter "Pressione Enter pra voltar ao menu do Win11 Repair..."
+    }
+  } while ($true)
+
+  if($transcriptStarted){ try { Stop-Transcript | Out-Null } catch {} }
+  Ok ("Win11 Repair finalizado. Log em: {0}" -f $logPath)
+  Pause-Enter
+}
+
+# ---------------- MENU PRINCIPAL (reduzido) ----------------
+function ShowHeaderMain{
+  Clear-Host
+  Write-Host "================ TOOLKIT (v3.9) ================" -ForegroundColor Cyan
+  Write-Host "[7] Corrigir pesquisa do Windows (Search Menu Iniciar)" -ForegroundColor Cyan
+  Write-Host "[9] Win11 Repair - Menu" -ForegroundColor Green
+  Write-Host "[0] Sair" -ForegroundColor White
+  Write-Host "================================================" -ForegroundColor Cyan
+}
+
+# ---------------- Loop principal ----------------
 do {
   try {
     ShowHeaderMain
-    $opt = Read-Host "Escolha uma opção"
+    $opt = Read-Host "Escolha uma opcao"
     switch($opt){
-      '1' { Run-Backup }
-      '2' { Run-Delete }
-      '3' { Run-Check  }
-      '4' { Run-RustDeskAllowDefender }
-      '5' { Run-CopyAll }
-      '6' { Run-DeleteAll }
       '7' { Run-FixSearch }
-      '8' { Run-RustDeskAllowSRP }
+      '9' { Run-Win11Repair }
       '0' { Info "Saindo..."; Start-Sleep -Milliseconds 120; exit 0 }
-      default { Warn "Opção inválida." }
-    }
-    if($opt -notin @('0')){
-      Info "Pressione Enter pra voltar ao menu..."
-      [void][System.Console]::ReadLine()
+      default { Warn "Opcao invalida."; Pause-Enter }
     }
   } catch {
     Err ("Erro: {0}" -f $_.Exception.Message)
-    Info "Pressione Enter pra continuar..."
-    [void][System.Console]::ReadLine()
+    Pause-Enter
   }
 } while ($true)
